@@ -1,0 +1,40 @@
+name: hardware-pen-test
+description: Agent template focused on recon + firmware analysis for hardware targets.
+defaults:
+  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_params:
+    model: llama3
+    host: http://127.0.0.1:11434
+
+agents:
+  recon_agent:
+    description: Surface mapping + firmware diffing agent
+    tools: [nmap_scan, firmware_diff]
+    planning:
+      max_iterations: 3
+
+tasks:
+  - id: recon-pass
+    agent: recon_agent
+    description: Identify potentially risky ports for 10.0.0.15 gateway
+    input: "target=10.0.0.15"
+  - id: firmware-assess
+    agent: recon_agent
+    description: Compare the latest firmware to the baseline to spot changes
+    input:
+      baseline: |
+        version: 1.0.0
+        ssh: disabled
+        telnet: disabled
+      current: |
+        version: 1.1.0
+        ssh: enabled
+        telnet: disabled
+
+tools:
+  nmap_scan:
+    type: agentic.tools.builtin:NmapScanTool
+    args:
+      firmware: build-2024.07
+  firmware_diff:
+    type: agentic.tools.builtin:FirmwareDiffTool

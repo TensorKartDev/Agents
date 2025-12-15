@@ -1,0 +1,42 @@
+name: sales-order-investigator
+description: Investigate suspicious enterprise sales orders.
+defaults:
+  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_params:
+    model: llama3
+    host: http://127.0.0.1:11434
+
+agents:
+  order_agent:
+    description: Looks up sales orders and evaluates anomalies
+    tools: [order_lookup, anomaly_scoring]
+    planning:
+      max_iterations: 4
+
+tasks:
+  - id: order-lookup
+    agent: order_agent
+    description: Retrieve the metadata for order 84593 and rate its risk.
+    input:
+      order_id: "84593"
+      signals: ["ship-to mismatch", "manual discount"]
+
+  - id: hvt-followup
+    agent: order_agent
+    description: Score the risk based on signals without lookup.
+    input:
+      order_id: "99999"
+      signals: ["stolen-card", "repeat chargeback"]
+
+tools:
+  order_lookup:
+    type: agentic.tools.builtin:OrderLookupTool
+    args:
+      orders:
+        - id: "84593"
+          customer: "Hooli Design"
+          amount: 89000
+          status: "pending manual review"
+          notes: "Urgent shipping requested"
+  anomaly_scoring:
+    type: agentic.tools.builtin:AnomalyScoringTool

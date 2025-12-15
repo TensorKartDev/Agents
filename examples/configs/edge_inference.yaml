@@ -1,0 +1,35 @@
+name: edge-inference-pilot
+description: Plan and monitor an edge/on-board AI deployment.
+defaults:
+  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_params:
+    model: llama3
+    host: http://127.0.0.1:11434
+
+agents:
+  edge_agent:
+    description: Coordinates deployment planning for edge inference workloads
+    tools: [edge_deployment_planner, anomaly_scoring]
+    planning:
+      max_iterations: 4
+
+tasks:
+  - id: deployment-checklist
+    agent: edge_agent
+    description: Build a deployment checklist for the lane-detection model
+    input:
+      model: lane-detection-v2
+      signals: ["thermal-drift", "gpu-throttle"]
+
+  - id: telemetry-risk
+    agent: edge_agent
+    description: Evaluate telemetry anomalies for drone-perception stack
+    input:
+      model: drone-perception-lite
+      signals: ["frame-drop", "sensor-sync"]
+
+tools:
+  edge_deployment_planner:
+    type: agentic.tools.builtin:EdgeDeploymentPlannerTool
+  anomaly_scoring:
+    type: agentic.tools.builtin:AnomalyScoringTool

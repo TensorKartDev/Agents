@@ -1,0 +1,109 @@
+name: firmware-penetration-workflow
+description: Multi-phase agent orchestration for firmware reverse engineering and pentesting.
+defaults:
+  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_params:
+    model: llama3
+    host: http://127.0.0.1:11434
+
+agents:
+  firmware_agent:
+    description: Executes the bare-metal/RTOS firmware workflow from intake to verification.
+    tools:
+      - firmware_intake
+      - firmware_format_identifier
+      - architecture_inference
+      - firmware_section_extractor
+      - firmware_static_analyzer
+      - secret_scanner
+      - weakness_profiler
+      - verification_planner
+    planning:
+      max_iterations: 4
+
+# Each task provides structured input that mirrors the workflow diagrams/cheat sheets.
+tasks:
+  - id: intake
+    agent: firmware_agent
+    description: Decide decompression path and OS handling for the provided firmware image.
+    input:
+      compressed: true
+      compression_type: gzip
+      linux_based: true
+
+  - id: format-identification
+    agent: firmware_agent
+    description: Identify firmware container via magic bytes.
+    input:
+      magic: "7F 45 4C 46"
+
+  - id: architecture-deduction
+    agent: firmware_agent
+    description: Infer architecture/toolchain characteristics.
+    input:
+      arch_hint: ARM Cortex-M
+      endianness: little
+
+  - id: section-extraction
+    agent: firmware_agent
+    description: Summarize carved sections for tooling handoff.
+    input:
+      sections:
+        - u-boot image @0x0
+        - squashfs rootfs @0x200000
+        - config partition @0x3F0000
+
+  - id: static-review
+    agent: firmware_agent
+    description: Perform configuration/component review.
+    input:
+      components:
+        - dropbear SSH server
+        - legacy telnet daemon
+        - bootloader with unsigned updates
+        - crypto: MD5 checksum verifier
+
+  - id: secret-harvest
+    agent: firmware_agent
+    description: Scan for secrets/keys in carved blobs.
+    input:
+      blob: |
+        admin_password=Secr3t!
+        cloud_api_key=abcd-efgh
+        WIFI_PSK=guest
+
+  - id: weakness-profile
+    agent: firmware_agent
+    description: Combine findings into a vulnerability profile.
+    input:
+      protocols: ["SSH", "Telnet", "HTTP"]
+      rtos: FreeRTOS
+      crypto: MD5 checksum
+      updater: unsigned OTA script
+
+  - id: verification-plan
+    agent: firmware_agent
+    description: Produce verification checklist for exploit/reporting phase.
+    input:
+      findings:
+        - Telnet exposed without auth
+        - Unsigned bootloader updates
+        - Hard-coded admin credentials
+
+tools:
+  firmware_intake:
+    type: agentic.tools.builtin:FirmwareIntakeTool
+  firmware_format_identifier:
+    type: agentic.tools.builtin:FirmwareFormatIdentifierTool
+  architecture_inference:
+    type: agentic.tools.builtin:ArchitectureInferenceTool
+  firmware_section_extractor:
+    type: agentic.tools.builtin:FirmwareSectionExtractorTool
+  firmware_static_analyzer:
+    type: agentic.tools.builtin:FirmwareStaticAnalyzerTool
+  secret_scanner:
+    type: agentic.tools.builtin:SecretScannerTool
+  weakness_profiler:
+    type: agentic.tools.builtin:WeaknessProfilerTool
+  verification_planner:
+    type: agentic.tools.builtin:VerificationPlannerTool
