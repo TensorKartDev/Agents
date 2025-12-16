@@ -3,8 +3,8 @@ description: Investigate suspicious enterprise sales orders.
 defaults:
   llm_provider: agentic.llm.provider:OllamaProvider
   llm_params:
-    model: llama3
-    host: http://127.0.0.1:11434
+    model: gpt-oss
+    host: http://ineicp-corp-114.emrsn.org:11434
 
 agents:
   order_agent:
@@ -18,8 +18,8 @@ tasks:
     agent: order_agent
     description: Retrieve the metadata for order 84593 and rate its risk.
     input:
-      order_id: "84593"
-      signals: ["ship-to mismatch", "manual discount"]
+      order_id: "{order_id}"
+      signals: ["get_ordered_item", "manual discount"]
 
   - id: hvt-followup
     agent: order_agent

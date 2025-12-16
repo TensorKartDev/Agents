@@ -5,6 +5,7 @@ docs/
 # Virtual environments
 .venv/
 venv/
+agentenv
 
 # Packaging artifacts
 build/

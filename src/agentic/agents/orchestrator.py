@@ -21,6 +21,12 @@ class Orchestrator:
         self.config = project_config
         self.tool_registry = ToolRegistry()
         register_builtin_tools(self.tool_registry)
+        # Discover any tools provided by installed packages via entry points
+        try:
+            self.tool_registry.discover_entrypoints()
+        except Exception:
+            # keep startup resilient if discovery fails
+            pass
         self.tool_registry.configure_from_specs(self.config.tool_specs)
         self.agents: Dict[str, Agent] = self._build_agents()
         self.tasks = self._build_tasks()

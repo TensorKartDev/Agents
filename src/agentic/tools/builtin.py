@@ -12,7 +12,13 @@ from .base import Tool, ToolContext, ToolResult
 from .registry import ToolRegistry
 
 
-def _load_structured(text: str) -> Any:
+def _load_structured(text: Any) -> Any:
+    # If the caller already passed a parsed structure (dict/list), return it as-is.
+    if isinstance(text, (dict, list)):
+        return text
+    # Only attempt to parse strings; non-string, non-structured inputs are returned.
+    if not isinstance(text, str):
+        return text
     try:
         return json.loads(text)
     except json.JSONDecodeError:
