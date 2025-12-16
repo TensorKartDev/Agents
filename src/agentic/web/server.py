@@ -46,14 +46,14 @@ HTML_PAGE = """<!doctype html>
     <title>Agentic Runner</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
     <style>
-      body { background: radial-gradient(circle at top, #0f172a 0%, #020617 55%, #01030a 100%); color: #e2e8f0; min-height: 100vh; }
-      .glass-card { background: rgba(15,23,42,0.85); border-radius: 20px; border: 1px solid rgba(94,234,212,0.3); box-shadow: 0 25px 50px rgba(15,23,42,0.8); }
-      .neon { color: #67e8f9; letter-spacing: 0.2rem; }
+      body { background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%); color: #0f172a; min-height: 100vh; }
+      .glass-card { background: rgba(255,255,255,0.9); border-radius: 20px; border: 1px solid rgba(59,130,246,0.2); box-shadow: 0 25px 40px rgba(15,23,42,0.1); }
+      .neon { color: #2563eb; letter-spacing: 0.2rem; }
       .status-text { font-weight: 700; text-transform: uppercase; }
-      .status-pending { color: #fbbf24; }
-      .status-thinking { color: #38bdf8; animation: pulse 1.5s infinite; }
-      .status-completed { color: #34d399; }
-      .console-log { background: #020617; color: #67e8f9; font-family: "Roboto Mono", monospace; padding: 1rem; border-radius: 12px; height: 220px; overflow-y: auto; }
+      .status-pending { color: #f97316; }
+      .status-thinking { color: #0ea5e9; animation: pulse 1.5s infinite; }
+      .status-completed { color: #10b981; }
+      .console-log { background: #e2e8f0; color: #0f172a; font-family: "Roboto Mono", monospace; padding: 1rem; border-radius: 12px; height: 220px; overflow-y: auto; }
       .progress-bar { transition: width 0.6s ease-in-out; }
       @keyframes pulse { 0% {opacity: 0.4;} 50% {opacity: 1;} 100% {opacity: 0.4;} }
     </style>
@@ -196,12 +196,12 @@ HTML_PAGE = """<!doctype html>
         totalTasks = event.tasks.length;
         event.tasks.forEach(task => {
           const card = document.createElement('div');
-          card.className = 'p-3 border border-info rounded-4 bg-dark bg-opacity-50';
+          card.className = 'p-3 border border-info rounded-4 bg-white bg-opacity-75';
           card.innerHTML = `
             <div class="d-flex justify-content-between">
               <div>
                 <div class="fw-bold text-uppercase text-secondary small">${task.id}</div>
-                <div class="text-light">${task.description}</div>
+                <div class="text-dark">${task.description}</div>
                 <div class="text-info small">Agent: ${task.agent}</div>
               </div>
               <div class="text-end status-text status-pending" id="status-${task.id}">pending</div>
@@ -246,9 +246,9 @@ HTML_PAGE = """<!doctype html>
         Object.entries(results).forEach(([taskId, output]) => {
           const wrapper = document.createElement('div');
           wrapper.className = 'col-md-6';
-          wrapper.innerHTML = `<div class="border border-info rounded-3 p-3 bg-dark bg-opacity-50">
+          wrapper.innerHTML = `<div class="border border-info rounded-3 p-3 bg-white bg-opacity-75">
             <h4 class="text-info">${taskId}</h4>
-            <pre class="text-light mb-0">${output}</pre>
+            <pre class="text-dark mb-0">${output}</pre>
           </div>`;
           container.appendChild(wrapper);
         });
