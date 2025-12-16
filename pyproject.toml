@@ -10,6 +10,10 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.7",
     "autogen>=0.3.0",
+    "ollama>=0.2.0",
+    "fix-busted-json>=0.0.18",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.23.0",
 ]
 
 [project.optional-dependencies]

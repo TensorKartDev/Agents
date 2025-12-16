@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .agents.orchestrator import Orchestrator
 from .autogen_runner import AutogenOrchestrator
@@ -14,6 +15,16 @@ from .config import ProjectConfig
 
 app = typer.Typer(help="Agentic template CLI")
 console = Console()
+
+
+def _render_plan(config: ProjectConfig) -> None:
+    plan = Table(title="Execution Plan", show_lines=True)
+    plan.add_column("Task ID")
+    plan.add_column("Agent")
+    plan.add_column("Description")
+    for spec in config.tasks:
+        plan.add_row(spec.id, spec.agent, spec.description)
+    console.print(plan)
 
 
 @app.command()
@@ -26,12 +37,45 @@ def run(
 
     config = ProjectConfig.from_file(str(config_path))
     console.print(f"[bold green]Running project[/] {config.name} (engine={engine})")
+    _render_plan(config)
+
+    task_specs = list(config.tasks)
+    results: dict[str, str] = {}
+    progress = Progress(
+        SpinnerColumn(style="cyan"),
+        TextColumn("[progress.description]{task.description}"),
+        TextColumn("{task.fields[status]}"),
+        transient=False,
+    )
+
     if engine == "legacy":
         orchestrator = Orchestrator(config)
-        results = orchestrator.run()
+        task_lookup = {task.id: task for task in orchestrator.tasks}
+
+        def runner(task_spec):
+            task_obj = task_lookup[task_spec.id]
+            result = orchestrator.runner.run(task_obj)
+            return result.output
+
     else:
         orchestrator = AutogenOrchestrator(config)
-        results = orchestrator.run()
+
+        def runner(task_spec):
+            return orchestrator.run_task(task_spec)
+
+    with progress:
+        progress_tasks = {
+            task_spec.id: progress.add_task(
+                f"{task_spec.id} - {task_spec.description}", status="[yellow]pending", start=False
+            )
+            for task_spec in task_specs
+        }
+        for task_spec in task_specs:
+            progress.update(progress_tasks[task_spec.id], status="[cyan]thinking...", start=True)
+            output = runner(task_spec)
+            results[task_spec.id] = output
+            progress.update(progress_tasks[task_spec.id], status="[green]completed ✅")
+
     table = Table(title="Task outputs", show_lines=True)
     table.add_column("Task ID")
     table.add_column("Output")

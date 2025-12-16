@@ -3,7 +3,7 @@ description: Agent template focused on recon + firmware analysis for hardware ta
 defaults:
   llm_provider: agentic.llm.provider:OllamaProvider
   llm_params:
-    model: gpt-oss
+    model: llama3.2
     host: http://localhost:11434
 
 agents:

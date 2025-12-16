@@ -154,6 +154,17 @@ agentic run examples/configs/hardware_pen_test.yaml --engine legacy --show-trace
 
 Both engines consume the same configs; the Autogen engine aligns with Microsoft’s latest agent framework guidance.
 
+## Web dashboard
+
+Launch the FastAPI dashboard to monitor runs from a browser:
+
+```bash
+uvicorn agentic.web.server:app --reload
+```
+
+Visit `http://127.0.0.1:8000`, enter any config path (e.g., `examples/configs/firmware_workflow.yaml`), and watch each task move from pending → thinking → completed with outputs rendered below the table. The UI works for any configuration and engine.
+The dashboard uses Bootstrap styling with neon progress bars and a live mission console, so runs feel “robotic” and easy to monitor.
+
 ## Testing
 
 Use the included `pytest` dependency to verify tools, planners, or integrations:

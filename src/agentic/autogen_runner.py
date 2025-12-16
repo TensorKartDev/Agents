@@ -26,17 +26,20 @@ class AutogenOrchestrator:
     def run(self) -> Dict[str, str]:
         outputs: Dict[str, str] = {}
         for task_spec in self.config.tasks:
-            agent_spec = self.config.get_agent(task_spec.agent)
-            assistant = self._build_assistant(agent_spec, task_spec.id)
-            user = self._build_user(task_spec.id)
-            prompt = self._build_task_prompt(task_spec, agent_spec)
-            result = user.initiate_chat(
-                assistant,
-                message=prompt,
-                max_turns=max(4, agent_spec.planning.max_iterations * 2),
-            )
-            outputs[task_spec.id] = self._extract_content(result)
+            outputs[task_spec.id] = self.run_task(task_spec)
         return outputs
+
+    def run_task(self, task_spec) -> str:
+        agent_spec = self.config.get_agent(task_spec.agent)
+        assistant = self._build_assistant(agent_spec, task_spec.id)
+        user = self._build_user(task_spec.id)
+        prompt = self._build_task_prompt(task_spec, agent_spec)
+        result = user.initiate_chat(
+            assistant,
+            message=prompt,
+            max_turns=max(4, agent_spec.planning.max_iterations * 2),
+        )
+        return self._extract_content(result)
 
     def _build_assistant(self, agent_spec: AgentSpec, task_id: str) -> AssistantAgent:
         llm_params = self._resolve_llm_params(agent_spec)
@@ -67,9 +70,17 @@ class AutogenOrchestrator:
         for tool_name in agent_spec.tools:
             tool = self.tool_registry.get(tool_name)
             assistant.register_function(
-                function=self._wrap_tool(tool_name, tool, agent_spec.name, task_id),
-                name=tool_name,
-                description=tool.description or tool_name,
+                {
+                    "name": tool_name,
+                    "description": tool.description or tool_name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input_text": {"type": "string"},
+                        },
+                    },
+                    "function": self._wrap_tool(tool_name, tool, agent_spec.name, task_id),
+                }
             )
         return assistant
 

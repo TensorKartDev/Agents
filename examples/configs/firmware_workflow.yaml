@@ -3,8 +3,8 @@ description: Multi-phase agent orchestration for firmware reverse engineering an
 defaults:
   llm_provider: agentic.llm.provider:OllamaProvider
   llm_params:
-    model: gpt-oss
-    host: http://ineicp-corp-114.emrsn.org:11434
+    model: llama3.2
+    host: http://localhost:11434
 
 agents:
   firmware_agent:
