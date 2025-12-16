@@ -57,7 +57,7 @@ A batteries-included template for building agentic systems that can be copied in
    ```bash
    agentic run examples/configs/firmware_workflow.yaml --show-trace
    ```
-   Each turn follows the JSON contract shown below so the agent can invoke tools such as `firmware_intake`, `firmware_format_identifier`, and `weakness_profiler` that encode the team’s process.
+   Each turn follows the JSON contract shown below so the agent can invoke tools such as `firmware_intake`, `firmware_format_identifier`, and `weakness_profiler` that encode the team’s process. The CLI defaults to the Microsoft Autogen/MAF engine, which drives Ollama-hosted models. Pass `--engine legacy` if you need the original in-house loop.
 
 3. **Swap in your LLM provider**
    - Implement `LLMProvider` (see `src/agentic/llm/provider.py`).
@@ -137,6 +137,22 @@ The CLI resolves the YAML, registers tools, builds agents, and runs the orchestr
 - **Firmware reverse engineering / penetration workflows** – the `firmware_workflow.yaml` config demonstrates the step-by-step diagram provided by the cyber team (intake, magic-byte detection, carving, Ghidra handoff, secret hunting, weakness profiling, and verification planning). Extend the built-in firmware tools to integrate real decompression, Binwalk runs, or Azure DevOps reporting scripts.
 
 Each scenario boils down to adding new tool factories and swapping configs, so you can keep a single orchestration core across very different domains.
+
+## Engines & Microsoft Autogen integration
+
+By default `agentic run` executes tasks through the Microsoft Agent Framework (Autogen) and calls your Ollama models as the LLM backend. The YAML-defined tools are registered as Autogen functions, so the planner automatically decides when to invoke them. Force an engine explicitly with:
+
+```bash
+agentic run examples/configs/hardware_pen_test.yaml --engine autogen
+```
+
+Switch back to the legacy JSON-contract planner (useful for debugging prompt issues or collecting per-iteration traces) via:
+
+```bash
+agentic run examples/configs/hardware_pen_test.yaml --engine legacy --show-trace
+```
+
+Both engines consume the same configs; the Autogen engine aligns with Microsoft’s latest agent framework guidance.
 
 ## Testing
 

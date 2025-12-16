@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .agents.orchestrator import Orchestrator
+from .autogen_runner import AutogenOrchestrator
 from .config import ProjectConfig
 
 app = typer.Typer(help="Agentic template CLI")
@@ -16,13 +17,21 @@ console = Console()
 
 
 @app.command()
-def run(config_path: Path = typer.Argument(..., help="Path to YAML configuration"), show_trace: bool = False) -> None:
+def run(
+    config_path: Path = typer.Argument(..., help="Path to YAML configuration"),
+    show_trace: bool = False,
+    engine: str = typer.Option("autogen", help="Engine to use: autogen or legacy"),
+) -> None:
     """Execute the tasks described in the given config file."""
 
     config = ProjectConfig.from_file(str(config_path))
-    orchestrator = Orchestrator(config)
-    console.print(f"[bold green]Running project[/] {config.name}")
-    results = orchestrator.run()
+    console.print(f"[bold green]Running project[/] {config.name} (engine={engine})")
+    if engine == "legacy":
+        orchestrator = Orchestrator(config)
+        results = orchestrator.run()
+    else:
+        orchestrator = AutogenOrchestrator(config)
+        results = orchestrator.run()
     table = Table(title="Task outputs", show_lines=True)
     table.add_column("Task ID")
     table.add_column("Output")
@@ -30,7 +39,7 @@ def run(config_path: Path = typer.Argument(..., help="Path to YAML configuration
         table.add_row(task_id, output)
     console.print(table)
 
-    if show_trace:
+    if show_trace and engine == "legacy":
         for task in orchestrator.tasks:
             result = orchestrator.runner.results().get(task.id)
             if not result:
@@ -38,6 +47,8 @@ def run(config_path: Path = typer.Argument(..., help="Path to YAML configuration
             console.rule(f"Trace for {task.id}")
             for entry in result.trace:
                 console.print(entry)
+    elif show_trace:
+        console.print("[yellow]Trace output is only available for the legacy engine.[/]")
 
 
 @app.command()

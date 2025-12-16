@@ -4,7 +4,7 @@ defaults:
   llm_provider: agentic.llm.provider:OllamaProvider
   llm_params:
     model: gpt-oss
-    host: http://ineicp-corp-114.emrsn.org:11434
+    host: http://localhost:11434
 
 agents:
   recon_agent:
