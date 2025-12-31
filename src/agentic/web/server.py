@@ -35,10 +35,14 @@ else:
 class RunState:
     config: ProjectConfig
     engine: str
+    config_path: str
     history: List[Dict[str, Any]] = field(default_factory=list)
     subscribers: List[asyncio.Queue] = field(default_factory=list)
     task: asyncio.Task | None = None
     completed: bool = False
+    total_tasks: int = 0
+    completed_tasks: int = 0
+    started_at: float = field(default_factory=time.time)
 
 
 RUNS: Dict[str, RunState] = {}
@@ -93,6 +97,11 @@ HTML_PAGE = r"""<!doctype html>
     .config-card-desc { font-size: 0.8rem; color: #6b7280; margin: 0.25rem 0 0 0; }
     .config-card-agent-badge { display: inline-block; background: rgba(37, 99, 235, 0.1); color: #2563eb; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; border: 1px solid rgba(37, 99, 235, 0.3); margin-top: 0.5rem; }
     @keyframes pulse-active { 0%, 100% { box-shadow: 0 0 0 3px rgba(59,130,246,0.3); } 50% { box-shadow: 0 0 0 6px rgba(59,130,246,0.15); } }
+    .active-runs-card { background: rgba(15,23,42,0.04); border: 1px dashed rgba(37,99,235,0.4); border-radius: 14px; padding: 1rem; }
+    .run-chip { display:flex; justify-content:space-between; align-items:center; padding:0.5rem 0.75rem; border-radius:10px; background:#fff; border:1px solid rgba(37,99,235,0.15); margin-bottom:0.5rem; }
+    .run-chip:last-child { margin-bottom:0; }
+    .run-title { font-weight:700; color:#0f172a; margin:0; }
+    .run-meta { font-size:0.85rem; color:#6b7280; }
     </style>
   </head>
   <body class="py-4">
@@ -120,6 +129,13 @@ HTML_PAGE = r"""<!doctype html>
             <option value="autogen" selected>Microsoft Agent Framework (MAF)</option>
             <option value="legacy">Legacy JSON loop</option>
           </select>
+        </div>
+        <div class="mt-3 active-runs-card">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="text-uppercase text-secondary small">Active workflows</div>
+            <span class="badge bg-primary">Live</span>
+          </div>
+          <div id="active-runs-list" class="small text-secondary">No workflows running yet.</div>
         </div>
       </div>
 
@@ -211,6 +227,7 @@ HTML_PAGE = r"""<!doctype html>
       let totalTasks = 0;
       let completedTasks = 0;
       let selectedConfig = null;
+      let runsInterval = null;
 
       // Config presets
       const configPresets = [
@@ -224,6 +241,7 @@ HTML_PAGE = r"""<!doctype html>
       document.addEventListener('DOMContentLoaded', function () {
         console.log('DOM ready');
         renderConfigCards();
+        startRunsPolling();
       });
 
       function renderConfigCards() {
@@ -236,7 +254,7 @@ HTML_PAGE = r"""<!doctype html>
           const card = document.createElement('div');
           card.className = 'config-card';
           card.dataset.config = cfg.path;
-          card.onclick = () => selectAndDeploy(cfg);
+          card.onclick = (evt) => selectAndDeploy(cfg, evt);
           
           const icon = document.createElement('div');
           icon.className = 'config-card-icon';
@@ -263,11 +281,13 @@ HTML_PAGE = r"""<!doctype html>
         });
       }
 
-      function selectAndDeploy(cfg) {
+      function selectAndDeploy(cfg, evt) {
         selectedConfig = cfg.path;
         // Update active card styling
         document.querySelectorAll('.config-card').forEach(c => c.classList.remove('active'));
-        event.currentTarget.classList.add('active');
+        if (evt && evt.currentTarget) {
+          evt.currentTarget.classList.add('active');
+        }
         // Auto-deploy
         deployRun();
       }
@@ -277,7 +297,6 @@ HTML_PAGE = r"""<!doctype html>
           alert('Please select a config first');
           return;
         }
-        resetUI();
         const engine = document.getElementById('engine').value;
         console.log('Deploying', { configPath: selectedConfig, engine });
         try {
@@ -293,6 +312,11 @@ HTML_PAGE = r"""<!doctype html>
               });
             }
             return res.json().then(data => {
+              resetUI();
+              if (data.already_running) {
+                const runSummary = document.getElementById('run-summary');
+                if (runSummary) runSummary.innerText = 'Attached to existing run';
+              }
               connectWebSocket(data.run_id);
             });
           }).catch(err => {
@@ -318,6 +342,61 @@ HTML_PAGE = r"""<!doctype html>
         completedTasks = 0;
         logEl = document.getElementById('log');
         if (ws) { ws.close(); }
+      }
+
+      function startRunsPolling() {
+        try {
+          if (runsInterval) clearInterval(runsInterval);
+          fetchActiveRuns();
+          runsInterval = setInterval(fetchActiveRuns, 4000);
+        } catch (e) {
+          console.error('Polling setup failed', e);
+        }
+      }
+
+      function fetchActiveRuns() {
+        fetch('/api/runs').then(res => res.json()).then(renderActiveRuns).catch(() => {});
+      }
+
+      function renderActiveRuns(data) {
+        const container = document.getElementById('active-runs-list');
+        if (!container) return;
+        const runs = (data && data.runs) ? data.runs : [];
+        const active = runs.filter(r => !r.completed);
+        if (!active.length) {
+          container.textContent = 'No workflows running right now.';
+          return;
+        }
+        container.innerHTML = '';
+        active.sort((a, b) => b.started_at - a.started_at).forEach(run => {
+          const chip = document.createElement('div');
+          chip.className = 'run-chip';
+
+          const left = document.createElement('div');
+          const title = document.createElement('div');
+          title.className = 'run-title';
+          title.textContent = run.project;
+          const meta = document.createElement('div');
+          meta.className = 'run-meta';
+          meta.textContent = `${run.tasks_completed}/${run.tasks_total} tasks • ${run.engine}`;
+          left.appendChild(title);
+          left.appendChild(meta);
+
+          const right = document.createElement('div');
+          right.style.width = '110px';
+          const barWrap = document.createElement('div');
+          barWrap.className = 'progress';
+          barWrap.style.height = '6px';
+          const bar = document.createElement('div');
+          bar.className = 'progress-bar bg-info';
+          bar.style.width = `${run.progress}%`;
+          barWrap.appendChild(bar);
+          right.appendChild(barWrap);
+
+          chip.appendChild(left);
+          chip.appendChild(right);
+          container.appendChild(chip);
+        });
       }
 
       function connectWebSocket(runId) {
@@ -692,9 +771,20 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
   config_path = Path(request.config_path)
   if not config_path.exists():
     raise HTTPException(status_code=400, detail=f"Config not found: {config_path}")
+  resolved_path = str(config_path.resolve())
+  # If a run for the same config is already active, reuse it instead of starting a duplicate
+  for existing_id, existing_state in RUNS.items():
+    if not existing_state.completed and existing_state.config_path == resolved_path:
+      return {"run_id": existing_id, "project": existing_state.config.name, "already_running": True}
   config = ProjectConfig.from_file(str(config_path))
   run_id = str(uuid.uuid4())
-  state = RunState(config=config, engine=request.engine)
+  state = RunState(
+      config=config,
+      engine=request.engine,
+      config_path=resolved_path,
+      total_tasks=len(config.tasks),
+      completed_tasks=0,
+  )
   RUNS[run_id] = state
   state.task = asyncio.create_task(execute_run(run_id, config, request.engine))
   return {"run_id": run_id, "project": config.name}
@@ -702,6 +792,8 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
 
 async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     state = RUNS[run_id]
+    state.total_tasks = len(config.tasks)
+    state.completed_tasks = 0
 
     async def broadcast(event: Dict[str, Any]) -> None:
         state.history.append(event)
@@ -748,6 +840,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
       t1 = time.perf_counter()
       duration = t1 - t0
       results[spec.id] = {"output": output, "duration": duration}
+      state.completed_tasks += 1
       await broadcast(
         {
           "type": "status",
@@ -799,3 +892,26 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
         if state.completed and not state.subscribers:
             RUNS.pop(run_id, None)
         await websocket.close()
+
+
+@app.get("/api/runs")
+async def list_runs() -> Dict[str, Any]:
+    summary = []
+    for run_id, state in RUNS.items():
+        progress = 0
+        if state.total_tasks:
+            progress = int((state.completed_tasks / state.total_tasks) * 100)
+        summary.append(
+            {
+                "run_id": run_id,
+                "project": state.config.name,
+                "engine": state.engine,
+                "completed": state.completed,
+                "progress": progress,
+                "tasks_total": state.total_tasks,
+                "tasks_completed": state.completed_tasks,
+                "started_at": state.started_at,
+                "config_path": state.config_path,
+            }
+        )
+    return {"runs": summary}

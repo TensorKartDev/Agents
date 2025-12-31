@@ -138,6 +138,20 @@ The CLI resolves the YAML, registers tools, builds agents, and runs the orchestr
 
 Each scenario boils down to adding new tool factories and swapping configs, so you can keep a single orchestration core across very different domains.
 
+### Firmware tooling integrations (real tools)
+
+The firmware workflow now executes real binaries instead of mocked responses. The tools call `binwalk`, `file`, `readelf`/`objdump`, `strings`, and `ripgrep` directly. To use them:
+
+1. Install dependencies (`binwalk`, `ripgrep`, `binutils` for `readelf`/`objdump`, and `file`).
+   - macOS (Homebrew): `brew install binwalk ripgrep binutils`
+   - Debian/Ubuntu: `sudo apt-get update && sudo apt-get install -y binwalk ripgrep binutils file`
+   - Fedora/RHEL: `sudo dnf install binwalk ripgrep binutils file`
+   - Windows: use WSL with the Debian commands above or install the packages via winget/chocolatey where available.
+2. Update `examples/configs/firmware_workflow.yaml` to point each task’s `path` at your firmware image (replace `/path/to/firmware.bin`).
+3. Set `extract: true` where you want Binwalk carving and adjust `output_dir` to control where artifacts are written.
+
+Outputs include real stdout/stderr from the commands. If a dependency is missing or the path is invalid, the tool surfaces the error instead of fabricating a result.
+
 ## Engines & Microsoft Autogen integration
 
 By default `agentic run` executes tasks through the Microsoft Agent Framework (Autogen) and calls your Ollama models as the LLM backend. The YAML-defined tools are registered as Autogen functions, so the planner automatically decides when to invoke them. Force an engine explicitly with:
@@ -163,7 +177,7 @@ uvicorn agentic.web.server:app --reload
 ```
 
 Visit `http://127.0.0.1:8000`, enter any config path (e.g., `examples/configs/firmware_workflow.yaml`), and watch each task move from pending → thinking → completed with outputs rendered below the table. The UI works for any configuration and engine.
-The dashboard uses Bootstrap styling with neon progress bars and a live mission console, so runs feel “robotic” and easy to monitor.
+The dashboard uses Bootstrap styling with neon progress bars and a live mission console, plus an “Active workflows” widget that surfaces in-progress runs with their % completion.
 
 ## Testing
 

@@ -27,59 +27,51 @@ tasks:
     agent: firmware_agent
     description: Decide decompression path and OS handling for the provided firmware image.
     input:
-      compressed: true
-      compression_type: gzip
-      linux_based: true
+      path: /path/to/firmware.bin  # replace with your firmware image path
+      extract: true
+      output_dir: ./artifacts/firmware_extract
 
   - id: format-identification
     agent: firmware_agent
     description: Identify firmware container via magic bytes.
     input:
-      magic: "7F 45 4C 46"
+      path: /path/to/firmware.bin
 
   - id: architecture-deduction
     agent: firmware_agent
     description: Infer architecture/toolchain characteristics.
     input:
-      arch_hint: ARM Cortex-M
-      endianness: little
+      path: /path/to/firmware.bin
 
   - id: section-extraction
     agent: firmware_agent
     description: Summarize carved sections for tooling handoff.
     input:
-      sections:
-        - u-boot image @0x0
-        - squashfs rootfs @0x200000
-        - config partition @0x3F0000
+      path: /path/to/firmware.bin
+      extract: false  # set true to carve with binwalk --dd
 
   - id: static-review
     agent: firmware_agent
     description: Perform configuration/component review.
     input:
-      components:
-        - dropbear SSH server
-        - legacy telnet daemon
-        - bootloader with unsigned updates
-        - crypto: MD5 checksum verifier
+      path: /path/to/firmware.bin
+      # Override patterns to hunt for specific services if needed.
+      patterns: ["ssh", "telnet", "dropbear", "httpd", "ftp", "ota", "upgrade", "busybox", "openssl", "shadow", "passwd"]
 
   - id: secret-harvest
     agent: firmware_agent
     description: Scan for secrets/keys in carved blobs.
     input:
-      blob: |
-        admin_password=Secr3t!
-        cloud_api_key=abcd-efgh
-        WIFI_PSK=guest
+      path: /path/to/firmware.bin
 
   - id: weakness-profile
     agent: firmware_agent
     description: Combine findings into a vulnerability profile.
     input:
-      protocols: ["SSH", "Telnet", "HTTP"]
-      rtos: FreeRTOS
-      crypto: MD5 checksum
-      updater: unsigned OTA script
+      path: /path/to/firmware.bin
+      rtos: unknown
+      crypto: unknown
+      updater: unknown
 
   - id: verification-plan
     agent: firmware_agent
