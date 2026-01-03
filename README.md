@@ -170,14 +170,19 @@ Both engines consume the same configs; the Autogen engine aligns with Microsoft�
 
 ## Web dashboard
 
-Launch the FastAPI dashboard to monitor runs from a browser:
+Launch the FastAPI dashboard (serves a static HTML/JS app) to monitor and control runs from a browser:
 
 ```bash
 uvicorn agentic.web.server:app --reload
 ```
 
-Visit `http://127.0.0.1:8000`, enter any config path (e.g., `examples/configs/firmware_workflow.yaml`), and watch each task move from pending → thinking → completed with outputs rendered below the table. The UI works for any configuration and engine.
-The dashboard uses Bootstrap styling with neon progress bars and a live mission console, plus an “Active workflows” widget that surfaces in-progress runs with their % completion.
+Then open `http://127.0.0.1:8000`:
+
+- Pick a workflow card (or enter a custom config path), choose an engine, and click **Start**. The button toggles to **Stop** while running; click it to cancel the workflow.
+- Watch tasks move from pending → thinking → completed with durations, progress, outputs, and a live mission console log.
+- “Active workflows” shows in-progress runs with % completion; the UI is mobile-friendly and lives under `src/agentic/web/index.html` with supporting assets in the same folder.
+
+Run in production with `uvicorn agentic.web.server:app --host 0.0.0.0 --port 8000` or behind your preferred ASGI server/reverse proxy.
 
 ## Testing
 
