@@ -43,6 +43,8 @@ class RunState:
     total_tasks: int = 0
     completed_tasks: int = 0
     started_at: float = field(default_factory=time.time)
+    stop_requested: bool = False
+    requested_path: str = ""
 
 
 RUNS: Dict[str, RunState] = {}
@@ -227,6 +229,8 @@ HTML_PAGE = r"""<!doctype html>
       let totalTasks = 0;
       let completedTasks = 0;
       let selectedConfig = null;
+      let currentRunId = null;
+      let currentRunConfig = null;
       let runsInterval = null;
 
       // Config presets
@@ -254,7 +258,7 @@ HTML_PAGE = r"""<!doctype html>
           const card = document.createElement('div');
           card.className = 'config-card';
           card.dataset.config = cfg.path;
-          card.onclick = (evt) => selectAndDeploy(cfg, evt);
+          card.onclick = (evt) => selectConfig(cfg, evt.currentTarget);
           
           const icon = document.createElement('div');
           icon.className = 'config-card-icon';
@@ -271,39 +275,81 @@ HTML_PAGE = r"""<!doctype html>
           const badge = document.createElement('div');
           badge.className = 'config-card-agent-badge';
           badge.textContent = cfg.keyword;
+
+          const actions = document.createElement('div');
+          actions.className = 'w-100';
+          const startBtn = document.createElement('button');
+          startBtn.className = 'btn btn-outline-primary w-100 start-stop-btn';
+          startBtn.textContent = 'Start';
+          startBtn.dataset.configPath = cfg.path;
+          startBtn.dataset.state = 'ready';
+          startBtn.onclick = (evt) => {
+            evt.stopPropagation();
+            selectConfig(cfg, card);
+            toggleRun(cfg.path, startBtn);
+          };
+          actions.appendChild(startBtn);
           
           card.appendChild(icon);
           card.appendChild(title);
           card.appendChild(desc);
           card.appendChild(badge);
+          card.appendChild(actions);
           col.appendChild(card);
           container.appendChild(col);
         });
       }
 
-      function selectAndDeploy(cfg, evt) {
+      function selectConfig(cfg, cardEl) {
         selectedConfig = cfg.path;
-        // Update active card styling
         document.querySelectorAll('.config-card').forEach(c => c.classList.remove('active'));
-        if (evt && evt.currentTarget) {
-          evt.currentTarget.classList.add('active');
-        }
-        // Auto-deploy
-        deployRun();
+        if (cardEl) cardEl.classList.add('active');
       }
 
-      function deployRun() {
-        if (!selectedConfig) {
+      function toggleRun(configPath, button) {
+        if (!button) return;
+        const state = button.dataset.state;
+        if (state === 'running' && button.dataset.runId) {
+          stopRun(button.dataset.runId, configPath, button);
+        } else {
+          deployRun(configPath, button);
+        }
+      }
+
+      function setButtonRunning(button, runId) {
+        if (!button) return;
+        button.dataset.state = 'running';
+        button.dataset.runId = runId || '';
+        button.textContent = 'Stop';
+        button.classList.remove('btn-outline-primary');
+        button.classList.add('btn-danger');
+      }
+
+      function setButtonReady(button) {
+        if (!button) return;
+        button.dataset.state = 'ready';
+        button.dataset.runId = '';
+        button.textContent = 'Start';
+        button.classList.add('btn-outline-primary');
+        button.classList.remove('btn-danger');
+      }
+
+      function deployRun(configPath, button) {
+        const cfgPath = configPath || selectedConfig;
+        if (!cfgPath) {
           alert('Please select a config first');
           return;
         }
+        selectedConfig = cfgPath;
         const engine = document.getElementById('engine').value;
-        console.log('Deploying', { configPath: selectedConfig, engine });
+        console.log('Deploying', { configPath: cfgPath, engine });
+        const btn = button;
+        if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
         try {
           fetch('/api/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config_path: selectedConfig, engine })
+            body: JSON.stringify({ config_path: cfgPath, engine })
           }).then(res => {
             console.log('Server response status:', res.status);
             if (!res.ok) {
@@ -313,6 +359,9 @@ HTML_PAGE = r"""<!doctype html>
             }
             return res.json().then(data => {
               resetUI();
+              currentRunId = data.run_id;
+              currentRunConfig = cfgPath;
+              if (btn) setButtonRunning(btn, data.run_id);
               if (data.already_running) {
                 const runSummary = document.getElementById('run-summary');
                 if (runSummary) runSummary.innerText = 'Attached to existing run';
@@ -322,6 +371,8 @@ HTML_PAGE = r"""<!doctype html>
           }).catch(err => {
             console.error('Error starting run', err);
             alert('Error starting run: ' + (err && err.message ? err.message : String(err)));
+          }).finally(() => {
+            if (btn) { btn.disabled = false; if (btn.dataset.state !== 'running') btn.textContent = 'Start'; }
           });
         } catch (err) {
           console.error('Error starting run', err);
@@ -337,6 +388,8 @@ HTML_PAGE = r"""<!doctype html>
         document.getElementById('global-progress').style.width = '0%';
         document.getElementById('engine-label').innerText = '';
         document.getElementById('log').innerHTML = '';
+        const runSummary = document.getElementById('run-summary');
+        if (runSummary) runSummary.innerText = 'Ready';
         statusRows = {};
         totalTasks = 0;
         completedTasks = 0;
@@ -365,6 +418,7 @@ HTML_PAGE = r"""<!doctype html>
         const active = runs.filter(r => !r.completed);
         if (!active.length) {
           container.textContent = 'No workflows running right now.';
+          syncCardButtons([]);
           return;
         }
         container.innerHTML = '';
@@ -397,6 +451,7 @@ HTML_PAGE = r"""<!doctype html>
           chip.appendChild(right);
           container.appendChild(chip);
         });
+        syncCardButtons(active);
       }
 
       function connectWebSocket(runId) {
@@ -432,12 +487,14 @@ HTML_PAGE = r"""<!doctype html>
             if (runSummary) runSummary.innerText = `Duration: ${Number(event.duration).toFixed(2)}s`;
           }
           appendLog('complete', 'Run complete — results available');
+          markRunFinished(event);
         } else if (event.type === 'console') {
           // server-side console messages (e.g. FINAL: summaries)
           if (event.message) appendLog('console', event.message);
         } else if (event.type === 'error') {
           alert(event.message);
           appendLog('error', event.message);
+          markRunFinished(event);
         }
       }
 
@@ -754,6 +811,65 @@ HTML_PAGE = r"""<!doctype html>
       function escapeHtml(unsafe) {
         return String(unsafe).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       }
+
+      function getButtonForConfig(configPath) {
+        const buttons = document.querySelectorAll('.start-stop-btn');
+        for (const btn of buttons) {
+          if (btn.dataset.configPath === configPath) return btn;
+        }
+        return null;
+      }
+
+      function markRunFinished(event) {
+        if (!currentRunConfig) return;
+        const btn = getButtonForConfig(currentRunConfig);
+        if (btn) setButtonReady(btn);
+        currentRunConfig = null;
+        currentRunId = null;
+      }
+
+      function stopRun(runId, configPath, button) {
+        if (!runId) return;
+        const btn = button;
+        if (btn) { btn.disabled = true; btn.textContent = 'Stopping...'; }
+        fetch(`/api/run/${runId}/stop`, { method: 'POST' })
+          .then(res => {
+            if (!res.ok) return res.text().then(t => { throw new Error(t || 'Failed to stop run'); });
+            return res.json();
+          })
+          .then(() => {
+            if (btn) setButtonReady(btn);
+            if (ws) ws.close();
+            resetUI();
+            currentRunId = null;
+            currentRunConfig = null;
+          })
+          .catch(err => {
+            console.error('Error stopping run', err);
+            alert('Error stopping run: ' + (err && err.message ? err.message : String(err)));
+          })
+          .finally(() => {
+            if (btn) { btn.disabled = false; if (btn.dataset.state !== 'running') btn.textContent = 'Start'; }
+          });
+      }
+
+      function syncCardButtons(activeRuns) {
+        const activeMap = {};
+        activeRuns.forEach(run => {
+          const key = run.request_path || run.config_path;
+          if (key) activeMap[key] = run.run_id;
+        });
+        const buttons = document.querySelectorAll('.start-stop-btn');
+        buttons.forEach(btn => {
+          const cfgPath = btn.dataset.configPath;
+          const runId = activeMap[cfgPath];
+          if (runId) {
+            setButtonRunning(btn, runId);
+          } else if (btn.dataset.state === 'running') {
+            setButtonReady(btn);
+          }
+        });
+      }
     </script>
   </body>
 </html>
@@ -782,6 +898,7 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
       config=config,
       engine=request.engine,
       config_path=resolved_path,
+      requested_path=request.config_path,
       total_tasks=len(config.tasks),
       completed_tasks=0,
   )
@@ -789,11 +906,23 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
   state.task = asyncio.create_task(execute_run(run_id, config, request.engine))
   return {"run_id": run_id, "project": config.name}
 
+@app.post("/api/run/{run_id}/stop")
+async def stop_run(run_id: str) -> Dict[str, Any]:
+    state = RUNS.get(run_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    state.stop_requested = True
+    state.completed = True
+    if state.task and not state.task.done():
+        state.task.cancel()
+    return {"run_id": run_id, "stopped": True}
+
 
 async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     state = RUNS[run_id]
     state.total_tasks = len(config.tasks)
     state.completed_tasks = 0
+    state.stop_requested = False
 
     async def broadcast(event: Dict[str, Any]) -> None:
         state.history.append(event)
@@ -815,6 +944,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     task_specs = list(config.tasks)
     results: Dict[str, Any] = {}
     run_start = time.perf_counter()
+    stopped_early = False
 
     if engine == "legacy":
         orchestrator = Orchestrator(config)
@@ -833,23 +963,32 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     for spec in task_specs:
       await broadcast({"type": "status", "task_id": spec.id, "status": "pending"})
 
-    for spec in task_specs:
-      await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})
-      t0 = time.perf_counter()
-      output = await asyncio.to_thread(run_single, spec)
-      t1 = time.perf_counter()
-      duration = t1 - t0
-      results[spec.id] = {"output": output, "duration": duration}
-      state.completed_tasks += 1
-      await broadcast(
-        {
-          "type": "status",
-          "task_id": spec.id,
-          "status": "completed",
-          "output": output,
-          "duration": duration,
-        }
-      )
+    try:
+      for spec in task_specs:
+        if state.stop_requested:
+          stopped_early = True
+          break
+        await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})
+        t0 = time.perf_counter()
+        output = await asyncio.to_thread(run_single, spec)
+        t1 = time.perf_counter()
+        duration = t1 - t0
+        results[spec.id] = {"output": output, "duration": duration}
+        state.completed_tasks += 1
+        await broadcast(
+          {
+            "type": "status",
+            "task_id": spec.id,
+            "status": "completed",
+            "output": output,
+            "duration": duration,
+          }
+        )
+    except asyncio.CancelledError:
+      stopped_early = True
+    except Exception as exc:  # safety: still surface errors
+      stopped_early = True
+      await broadcast({"type": "error", "message": f"Run failed: {exc}"})
 
     # If any task output contains a FINAL: summary, also broadcast it as a console message
     for task_id, obj in results.items():
@@ -863,7 +1002,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     run_end = time.perf_counter()
     overall = run_end - run_start
 
-    await broadcast({"type": "complete", "results": results, "duration": overall})
+    await broadcast({"type": "complete", "results": results, "duration": overall, "stopped": stopped_early or state.stop_requested})
     state.completed = True
 
 
@@ -912,6 +1051,7 @@ async def list_runs() -> Dict[str, Any]:
                 "tasks_completed": state.completed_tasks,
                 "started_at": state.started_at,
                 "config_path": state.config_path,
+                "request_path": state.requested_path or state.config_path,
             }
         )
     return {"runs": summary}
