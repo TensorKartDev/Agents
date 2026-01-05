@@ -192,4 +192,4 @@ Use the included `pytest` dependency to verify tools, planners, or integrations:
 pytest
 ```
 
-The sample modules are intentionally lightweight to make it easy to adapt the template to very different agentic workloads.
+The sample modules are intentionally lightweight to make it easy to adapt the template to very different agentic workloads. Add your own test suites under `tests/` as needed.
