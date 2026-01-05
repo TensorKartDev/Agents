@@ -282,6 +282,7 @@ function deployRun(configPath, button) {
   const engine = document.getElementById('engine').value;
   const btn = button;
   if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+  resetUI();
   fetch('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -293,7 +294,6 @@ function deployRun(configPath, button) {
       });
     }
     return res.json().then(data => {
-      resetUI();
       const tab = ensureTab(data.run_id, data.project || cfgPath);
       activateTab(data.run_id);
       state.currentRunConfig = cfgPath;
@@ -323,7 +323,6 @@ function stopRun(runId, configPath, button) {
     .then(() => {
       if (btn) setButtonReady(btn);
       if (state.ws) state.ws.close();
-      resetUI();
       const tab = getTab(runId);
       if (tab && tab.elements.runSummary) tab.elements.runSummary.innerText = 'Stopped';
       state.currentRunId = null;
@@ -339,23 +338,7 @@ function stopRun(runId, configPath, button) {
 }
 
 function resetUI() {
-  const tab = getActiveTab();
-  if (tab) {
-    const el = tab.elements;
-    if (el.planContainer) el.planContainer.style.display = 'none';
-    if (el.tasksList) el.tasksList.innerHTML = '';
-    if (el.outputs) el.outputs.style.display = 'none';
-    if (el.outputList) el.outputList.innerHTML = '';
-    if (el.globalProgress) el.globalProgress.style.width = '0%';
-    if (el.globalProgressLabel) el.globalProgressLabel.textContent = '0%';
-    if (el.engineLabel) el.engineLabel.innerText = '';
-    if (el.log) el.log.innerHTML = '';
-    if (el.runSummary) el.runSummary.innerText = 'Ready';
-    tab.statusRows = {};
-    tab.totalTasks = 0;
-    tab.completedTasks = 0;
-  }
-  if (state.ws) { state.ws.close(); }
+  if (state.ws) { state.ws.close(); state.ws = null; }
 }
 
 function startRunsPolling() {

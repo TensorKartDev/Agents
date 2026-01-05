@@ -287,13 +287,12 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     try:
         for event in state.history:
             await websocket.send_text(json.dumps(event))
-        if state.completed:
-            return
-        while True:
+        completed = state.completed
+        while not completed:
             event = await queue.get()
             await websocket.send_text(json.dumps(event))
             if event.get("type") == "complete":
-                break
+                completed = True
     except WebSocketDisconnect:
         pass
     finally:
