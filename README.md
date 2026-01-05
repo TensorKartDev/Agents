@@ -184,6 +184,13 @@ Then open `http://127.0.0.1:8000`:
 
 Run in production with `uvicorn agentic.web.server:app --host 0.0.0.0 --port 8000` or behind your preferred ASGI server/reverse proxy.
 
+### Creating your own agents
+
+- Drop a manifest under `agents/<slug>/agent.yaml` (or `agent.yml`) with `name`, `description`, optional `icon`, and a `config_path` or inline config. Add optional assets/code alongside it.
+- Restart the FastAPI server; the Admin Web UI auto-discovers cards from `/api/agents`, so agent creators never touch UI code.
+- Run the same config via CLI: `agentic run agents/<slug>/agent.yaml --engine autogen` (or `--engine legacy`).
+- See `docs/creating_agents.md` for a short, copy-pasteable template and validation tips.
+
 ## Testing
 
 Use the included `pytest` dependency to verify tools, planners, or integrations:
