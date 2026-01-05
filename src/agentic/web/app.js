@@ -1,76 +1,225 @@
 'use strict';
 
 const state = {
-  statusRows: {},
   ws: null,
-  logEl: null,
-  totalTasks: 0,
-  completedTasks: 0,
   selectedConfig: null,
   currentRunId: null,
-  currentRunConfig: null,
   runsInterval: null,
+  runsByPath: {},
+  tabs: {},
+  activeTabId: null,
 };
 
+function getActiveTab() {
+  return getTab(state.currentRunId) || getTab(state.activeTabId);
+}
+
 const configPresets = [
-  { name: 'Edge Inference Agent', path: 'examples/configs/edge_inference.yaml', desc: 'Edge inference workflow', icon: '🤖', keyword: 'ML Agent' },
-  { name: 'Firmware Penetration Testing Agent', path: 'examples/configs/firmware_workflow.yaml', desc: 'Firmware security testing', icon: '⚙️', keyword: 'Security Agent' },
-  { name: 'Hardware Penetration Testing Agent', path: 'examples/configs/hardware_pen_test.yaml', desc: 'Hardware security testing', icon: '🔍', keyword: 'Security Agent' },
-  { name: 'Sales Order Investigation Agent', path: 'examples/configs/sales_order_investigation.yaml', desc: 'Sales order analysis', icon: '📊', keyword: 'Business Agent' },
+  { id: 'edge_inference', name: 'Edge Inference Agent', description: 'Edge inference workflow', icon: '/static/img/robot.svg', config_path: 'examples/configs/edge_inference.yaml' },
+  { id: 'firmware_pen_test', name: 'Firmware Penetration Testing Agent', description: 'Firmware security testing', icon: '/static/img/robot.svg', config_path: 'examples/configs/firmware_workflow.yaml' },
+  { id: 'hardware_pen_test', name: 'Hardware Penetration Testing Agent', description: 'Hardware security testing', icon: '/static/img/robot.svg', config_path: 'examples/configs/hardware_pen_test.yaml' },
+  { id: 'sales_order_investigation', name: 'Sales Order Investigation Agent', description: 'Sales order analysis', icon: '/static/img/robot.svg', config_path: 'examples/configs/sales_order_investigation.yaml' },
 ];
 
-window.addEventListener('error', e => {
-  try { console.error('Uncaught error', e); } catch (err) {}
+function getTab(runId) {
+  return runId ? state.tabs[runId] : null;
+}
+
+function ensureTab(runId, label) {
+  if (!runId) return null;
+  if (state.tabs[runId]) return state.tabs[runId];
+  const tabs = document.getElementById('mission-tabs');
+  const contents = document.getElementById('mission-tab-contents');
+  if (!tabs || !contents) return null;
+
+  const tabId = `tab-${runId}`;
+  const li = document.createElement('li');
+  li.className = 'nav-item';
+  const btn = document.createElement('button');
+  btn.className = 'nav-link';
+  btn.id = `${tabId}-btn`;
+  btn.type = 'button';
+  btn.role = 'tab';
+  btn.textContent = label || `Run ${runId.slice(0, 8)}`;
+  btn.onclick = () => activateTab(runId);
+  li.appendChild(btn);
+  tabs.appendChild(li);
+
+  const pane = document.createElement('div');
+  pane.className = 'tab-pane fade';
+  pane.id = `${tabId}-pane`;
+  pane.role = 'tabpanel';
+  pane.dataset.runId = runId;
+  pane.innerHTML = `
+    <div class="row">
+      <div class="col-lg-7 mb-3">
+        <div class="glass-card p-3 h-100">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+              <div class="text-secondary small">Run: ${runId.slice(0, 8)}</div>
+              <small class="text-secondary" data-role="run-summary">Ready</small>
+            </div>
+            <div class="text-end">
+              <small class="text-secondary" data-role="engine-label"></small>
+            </div>
+          </div>
+          <div class="console-log" data-role="log"></div>
+        </div>
+      </div>
+      <div class="col-lg-5 mb-3">
+        <div class="glass-card p-3 mb-3" data-role="plan-container" style="display:none;">
+          <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+            <div>
+              <h2 data-role="project-title" class="h5 mb-0 text-info"></h2>
+            </div>
+            <div class="text-end">
+              <span class="text-uppercase text-secondary small">Progress</span>
+              <div class="progress progress-with-label" style="width: 220px; height: 10px;">
+                <div data-role="global-progress" class="progress-bar bg-info" style="width: 0%"></div>
+                <span data-role="global-progress-label" class="progress-label">0%</span>
+              </div>
+            </div>
+          </div>
+          <div data-role="tasks-list" class="vstack gap-3"></div>
+        </div>
+      </div>
+      <div class="col-12 mb-3">
+        <div class="glass-card p-3" data-role="outputs" style="display:none;">
+          <h3 class="h6 text-info mb-3">Results</h3>
+          <div data-role="output-list" class="row gy-3"></div>
+        </div>
+      </div>
+    </div>
+  `;
+  contents.appendChild(pane);
+
+  const refs = {
+    tabButton: btn,
+    pane,
+    log: pane.querySelector('[data-role="log"]'),
+    planContainer: pane.querySelector('[data-role="plan-container"]'),
+    tasksList: pane.querySelector('[data-role="tasks-list"]'),
+    outputs: pane.querySelector('[data-role="outputs"]'),
+    outputList: pane.querySelector('[data-role="output-list"]'),
+    globalProgress: pane.querySelector('[data-role="global-progress"]'),
+    globalProgressLabel: pane.querySelector('[data-role="global-progress-label"]'),
+    engineLabel: pane.querySelector('[data-role="engine-label"]'),
+    projectTitle: pane.querySelector('[data-role="project-title"]'),
+    runSummary: pane.querySelector('[data-role="run-summary"]'),
+  };
+
+  const tabState = {
+    statusRows: {},
+    totalTasks: 0,
+    completedTasks: 0,
+    elements: refs,
+  };
+  state.tabs[runId] = tabState;
+  return tabState;
+}
+
+function activateTab(runId) {
+  const tab = ensureTab(runId);
+  if (!tab) return;
+  const tabs = document.getElementById('mission-tabs');
+  const contents = document.getElementById('mission-tab-contents');
+  if (tabs && contents) {
+    tabs.querySelectorAll('.nav-link').forEach(btn => btn.classList.remove('active'));
+    contents.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('show', 'active'));
+  }
+  tab.elements.tabButton.classList.add('active');
+  tab.elements.pane.classList.add('show', 'active');
+  state.activeTabId = runId;
+  state.currentRunId = runId;
+  state.logEl = tab.elements.log;
+}
+
+function setTabLabel(runId, label) {
+  const tab = getTab(runId);
+  if (tab && label) {
+    tab.elements.tabButton.textContent = label;
+  }
+}
+
+async function fetchAndRenderAgents() {
+  try {
+    const response = await fetch("/api/agents");
+    const agents = await response.json();
+    const list = Array.isArray(agents) ? agents : [];
+    const merged = [
+      ...list,
+      ...configPresets.filter(
+        preset => !list.some(agent => (agent.id && agent.id === preset.id) || (agent.config_path && agent.config_path === preset.config_path))
+      ),
+    ];
+    renderConfigCards(merged);
+  } catch (error) {
+    console.error("Error fetching agents:", error);
+    renderConfigCards(configPresets);
+  }
+}
+
+window.addEventListener("error", (e) => {
+  try {
+    console.error("Uncaught error", e);
+  } catch (err) {}
 });
-window.addEventListener('unhandledrejection', e => {
-  try { console.error('Unhandled rejection', e); } catch (err) {}
+window.addEventListener("unhandledrejection", (e) => {
+  try {
+    console.error("Unhandled rejection", e);
+  } catch (err) {}
 });
 
-document.addEventListener('DOMContentLoaded', () => {
-  state.logEl = document.getElementById('log');
-  renderConfigCards();
+document.addEventListener("DOMContentLoaded", () => {
+  state.logEl = null;
+  fetchAndRenderAgents();
   startRunsPolling();
 });
 
-function renderConfigCards() {
-  const container = document.getElementById('config-cards-container');
+function renderConfigCards(agents) {
+  const container = document.getElementById("config-cards-container");
   if (!container) return;
-  configPresets.forEach(cfg => {
-    const col = document.createElement('div');
-    col.className = 'col-sm-6 col-lg-3';
+  container.innerHTML = ""; // Clear existing cards
+  agents.forEach((agent) => {
+    const col = document.createElement("div");
+    col.className = "col-sm-6 col-lg-3";
 
-    const card = document.createElement('div');
-    card.className = 'config-card';
-    card.dataset.config = cfg.path;
-    card.onclick = () => selectConfig(cfg, card);
+    const card = document.createElement("div");
+    card.className = "config-card";
+    card.dataset.config = agent.config_path;
+    card.onclick = () => selectConfig(agent, card, true);
 
-    const icon = document.createElement('div');
-    icon.className = 'config-card-icon';
-    icon.textContent = cfg.icon;
+    const icon = document.createElement("div");
+    icon.className = "config-card-icon";
+    const img = document.createElement("img");
+    img.src = agent.icon;
+    img.style.width = "48px";
+    img.style.height = "48px";
+    icon.appendChild(img);
 
-    const title = document.createElement('div');
-    title.className = 'config-card-title';
-    title.textContent = cfg.name;
+    const title = document.createElement("div");
+    title.className = "config-card-title";
+    title.textContent = agent.name;
 
-    const desc = document.createElement('div');
-    desc.className = 'config-card-desc';
-    desc.textContent = cfg.desc;
+    const desc = document.createElement("div");
+    desc.className = "config-card-desc";
+    desc.textContent = agent.description;
 
-    const badge = document.createElement('div');
-    badge.className = 'config-card-agent-badge';
-    badge.textContent = cfg.keyword;
+    const badge = document.createElement("div");
+    badge.className = "config-card-agent-badge";
+    badge.textContent = agent.id;
 
-    const actions = document.createElement('div');
-    actions.className = 'w-100';
-    const startBtn = document.createElement('button');
-    startBtn.className = 'btn btn-outline-primary w-100 start-stop-btn';
-    startBtn.textContent = 'Start';
-    startBtn.dataset.configPath = cfg.path;
-    startBtn.dataset.state = 'ready';
-    startBtn.onclick = evt => {
+    const actions = document.createElement("div");
+    actions.className = "w-100";
+    const startBtn = document.createElement("button");
+    startBtn.className = "btn btn-outline-primary w-100 start-stop-btn";
+    startBtn.textContent = "Start";
+    startBtn.dataset.configPath = agent.config_path;
+    startBtn.dataset.state = "ready";
+    startBtn.onclick = (evt) => {
       evt.stopPropagation();
-      selectConfig(cfg, card);
-      toggleRun(cfg.path, startBtn);
+      selectConfig(agent, card, false);
+      toggleRun(agent.config_path, startBtn);
     };
     actions.appendChild(startBtn);
 
@@ -84,10 +233,15 @@ function renderConfigCards() {
   });
 }
 
-function selectConfig(cfg, cardEl) {
-  state.selectedConfig = cfg.path;
-  document.querySelectorAll('.config-card').forEach(c => c.classList.remove('active'));
-  if (cardEl) cardEl.classList.add('active');
+function selectConfig(agent, cardEl, refreshRuns = true) {
+  state.selectedConfig = agent.config_path;
+  document.querySelectorAll(".config-card").forEach((c) => c.classList.remove("active"));
+  if (cardEl) cardEl.classList.add("active");
+  if (refreshRuns) {
+    refreshRunsAndAttach(agent.config_path);
+  } else {
+    attachToRunByConfig(agent.config_path);
+  }
 }
 
 function toggleRun(configPath, button) {
@@ -140,13 +294,13 @@ function deployRun(configPath, button) {
     }
     return res.json().then(data => {
       resetUI();
-      state.currentRunId = data.run_id;
+      const tab = ensureTab(data.run_id, data.project || cfgPath);
+      activateTab(data.run_id);
       state.currentRunConfig = cfgPath;
-      if (btn) setButtonRunning(btn, data.run_id);
-      if (data.already_running) {
-        const runSummary = document.getElementById('run-summary');
-        if (runSummary) runSummary.innerText = 'Attached to existing run';
+      if (tab && tab.elements.runSummary) {
+        tab.elements.runSummary.innerText = data.already_running ? 'Attached to existing run' : 'Starting...';
       }
+      if (btn) setButtonRunning(btn, data.run_id);
       connectWebSocket(data.run_id);
     });
   }).catch(err => {
@@ -170,6 +324,8 @@ function stopRun(runId, configPath, button) {
       if (btn) setButtonReady(btn);
       if (state.ws) state.ws.close();
       resetUI();
+      const tab = getTab(runId);
+      if (tab && tab.elements.runSummary) tab.elements.runSummary.innerText = 'Stopped';
       state.currentRunId = null;
       state.currentRunConfig = null;
     })
@@ -183,19 +339,22 @@ function stopRun(runId, configPath, button) {
 }
 
 function resetUI() {
-  document.getElementById('plan-container').style.display = 'none';
-  document.getElementById('tasks-list').innerHTML = '';
-  document.getElementById('outputs').style.display = 'none';
-  document.getElementById('output-list').innerHTML = '';
-  document.getElementById('global-progress').style.width = '0%';
-  document.getElementById('engine-label').innerText = '';
-  document.getElementById('log').innerHTML = '';
-  const runSummary = document.getElementById('run-summary');
-  if (runSummary) runSummary.innerText = 'Ready';
-  state.statusRows = {};
-  state.totalTasks = 0;
-  state.completedTasks = 0;
-  state.logEl = document.getElementById('log');
+  const tab = getActiveTab();
+  if (tab) {
+    const el = tab.elements;
+    if (el.planContainer) el.planContainer.style.display = 'none';
+    if (el.tasksList) el.tasksList.innerHTML = '';
+    if (el.outputs) el.outputs.style.display = 'none';
+    if (el.outputList) el.outputList.innerHTML = '';
+    if (el.globalProgress) el.globalProgress.style.width = '0%';
+    if (el.globalProgressLabel) el.globalProgressLabel.textContent = '0%';
+    if (el.engineLabel) el.engineLabel.innerText = '';
+    if (el.log) el.log.innerHTML = '';
+    if (el.runSummary) el.runSummary.innerText = 'Ready';
+    tab.statusRows = {};
+    tab.totalTasks = 0;
+    tab.completedTasks = 0;
+  }
   if (state.ws) { state.ws.close(); }
 }
 
@@ -209,20 +368,43 @@ function fetchActiveRuns() {
   fetch('/api/runs').then(res => res.json()).then(renderActiveRuns).catch(() => {});
 }
 
+function refreshRunsAndAttach(configPath) {
+  fetch('/api/runs')
+    .then(res => res.json())
+    .then(data => {
+      renderActiveRuns(data);
+      attachToRunByConfig(configPath);
+    })
+    .catch(() => attachToRunByConfig(configPath));
+}
+
 function renderActiveRuns(data) {
   const container = document.getElementById('active-runs-list');
   if (!container) return;
   const runs = (data && data.runs) ? data.runs : [];
-  const active = runs.filter(r => !r.completed);
-  if (!active.length) {
-    container.textContent = 'No workflows running right now.';
+  const runMap = {};
+  runs.forEach(run => {
+    const keys = [run.request_path, run.config_path].filter(Boolean);
+    keys.forEach(k => { runMap[k] = run; });
+  });
+  state.runsByPath = runMap;
+  if (!runs.length) {
+    container.textContent = 'No workflows yet.';
     syncCardButtons([]);
     return;
   }
   container.innerHTML = '';
-  active.sort((a, b) => b.started_at - a.started_at).forEach(run => {
+  runs.sort((a, b) => b.started_at - a.started_at).forEach(run => {
     const chip = document.createElement('div');
     chip.className = 'run-chip';
+    chip.tabIndex = 0;
+    chip.onclick = () => attachToRun(run);
+    chip.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        attachToRun(run);
+      }
+    };
 
     const left = document.createElement('div');
     const title = document.createElement('div');
@@ -230,38 +412,54 @@ function renderActiveRuns(data) {
     title.textContent = run.project;
     const meta = document.createElement('div');
     meta.className = 'run-meta';
-    meta.textContent = `${run.tasks_completed}/${run.tasks_total} tasks • ${run.engine}`;
+    const statusText = run.completed ? 'Completed' : 'Running';
+    meta.textContent = `${run.tasks_completed}/${run.tasks_total} tasks • ${run.engine} • ${statusText}`;
     left.appendChild(title);
     left.appendChild(meta);
 
     const right = document.createElement('div');
-    right.style.width = '110px';
+    right.className = 'run-progress-wrap';
     const barWrap = document.createElement('div');
-    barWrap.className = 'progress';
-    barWrap.style.height = '6px';
+    barWrap.className = 'progress progress-with-label';
+    barWrap.style.height = '10px';
     const bar = document.createElement('div');
-    bar.className = 'progress-bar bg-info';
-    bar.style.width = `${run.progress}%`;
+    bar.className = `progress-bar ${run.completed ? 'bg-success' : 'bg-info'}`;
+    const pct = Number.isFinite(run.progress) ? Math.round(run.progress) : 0;
+    bar.style.width = `${pct}%`;
+    const barLabel = document.createElement('span');
+    barLabel.className = 'progress-label';
+    barLabel.textContent = `${pct}%`;
     barWrap.appendChild(bar);
+    barWrap.appendChild(barLabel);
+
+    const badge = document.createElement('span');
+    badge.className = `badge ${run.completed ? 'bg-success' : 'bg-primary'} ms-2`;
+    badge.textContent = run.completed ? 'Completed' : 'Live';
+
     right.appendChild(barWrap);
+    right.appendChild(badge);
 
     chip.appendChild(left);
     chip.appendChild(right);
     container.appendChild(chip);
   });
-  syncCardButtons(active);
+  syncCardButtons(runs);
 }
 
 function syncCardButtons(activeRuns) {
   const activeMap = {};
-  activeRuns.forEach(run => {
-    const key = run.request_path || run.config_path;
-    if (key) activeMap[key] = run.run_id;
+  activeRuns.filter(r => !r.completed).forEach(run => {
+    const keys = [run.request_path, run.config_path].filter(Boolean);
+    keys.forEach(k => { activeMap[k] = run.run_id; });
   });
   const buttons = document.querySelectorAll('.start-stop-btn');
   buttons.forEach(btn => {
     const cfgPath = btn.dataset.configPath;
-    const runId = activeMap[cfgPath];
+    let runId = activeMap[cfgPath];
+    if (!runId) {
+      const match = Object.entries(activeMap).find(([key]) => key && key.endsWith(cfgPath));
+      if (match) runId = match[1];
+    }
     if (runId) {
       setButtonRunning(btn, runId);
     } else if (btn.dataset.state === 'running') {
@@ -271,6 +469,7 @@ function syncCardButtons(activeRuns) {
 }
 
 function connectWebSocket(runId) {
+  activateTab(runId);
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   state.ws = new WebSocket(`${protocol}://${window.location.host}/ws/${runId}`);
   state.ws.onmessage = event => {
@@ -293,8 +492,8 @@ function handleEvent(event) {
   } else if (event.type === 'complete') {
     renderOutputs(event.results);
     if (event.duration !== undefined) {
-      const runSummary = document.getElementById('run-summary');
-      if (runSummary) runSummary.innerText = `Duration: ${Number(event.duration).toFixed(2)}s`;
+      const tab = getTab(state.currentRunId);
+      if (tab && tab.elements.runSummary) tab.elements.runSummary.innerText = `Duration: ${Number(event.duration).toFixed(2)}s`;
     }
     appendLog('complete', event.stopped ? 'Run stopped' : 'Run complete — results available');
     markRunFinished();
@@ -308,11 +507,20 @@ function handleEvent(event) {
 }
 
 function renderPlan(event) {
-  document.getElementById('project-title').innerText = event.project;
-  document.getElementById('engine-label').innerText = `Engine: ${event.engine}`;
-  document.getElementById('plan-container').style.display = 'block';
-  const list = document.getElementById('tasks-list');
-  state.totalTasks = event.tasks.length;
+  const tab = getActiveTab();
+  if (!tab) return;
+  setTabLabel(state.currentRunId || state.activeTabId, event.project);
+  const { projectTitle, engineLabel, planContainer, tasksList, globalProgressLabel } = tab.elements;
+  if (projectTitle) projectTitle.innerText = event.project;
+  if (engineLabel) engineLabel.innerText = `Engine: ${event.engine}`;
+  if (planContainer) planContainer.style.display = 'block';
+  const list = tasksList;
+  if (!list) return;
+  list.innerHTML = '';
+  tab.statusRows = {};
+  tab.totalTasks = event.tasks.length;
+  tab.completedTasks = 0;
+  if (globalProgressLabel) globalProgressLabel.textContent = '0%';
   event.tasks.forEach(task => {
     const card = document.createElement('div');
     card.className = 'p-3 border border-info rounded-4 bg-white bg-opacity-75';
@@ -331,7 +539,7 @@ function renderPlan(event) {
       </div>
     `;
     list.appendChild(card);
-    state.statusRows[task.id] = {
+    tab.statusRows[task.id] = {
       label: card.querySelector(`#status-${task.id}`),
       bar: card.querySelector(`#progress-${task.id}`),
     };
@@ -339,7 +547,9 @@ function renderPlan(event) {
 }
 
 function updateStatus(event) {
-  const row = state.statusRows[event.task_id];
+  const tab = getActiveTab();
+  if (!tab) return;
+  const row = tab.statusRows[event.task_id];
   if (!row) return;
   row.label.classList.remove('status-pending', 'status-thinking', 'status-completed');
   let width = '0%';
@@ -352,11 +562,13 @@ function updateStatus(event) {
   } else if (event.status === 'completed') {
     row.label.classList.add('status-completed');
     width = '100%';
-    state.completedTasks += 1;
-    const overall = state.totalTasks ? Math.round((state.completedTasks / state.totalTasks) * 100) : 0;
-    document.getElementById('global-progress').style.width = overall + '%';
+    tab.completedTasks += 1;
+    const overall = tab.totalTasks ? Math.round((tab.completedTasks / tab.totalTasks) * 100) : 0;
+    if (tab.elements.globalProgress) tab.elements.globalProgress.style.width = overall + '%';
+    const globalLabel = tab.elements.globalProgressLabel;
+    if (globalLabel) globalLabel.textContent = `${overall}%`;
     if (event.duration !== undefined) {
-      const durEl = document.getElementById(`duration-${event.task_id}`);
+      const durEl = tab.elements.pane.querySelector(`#duration-${event.task_id}`);
       if (durEl) durEl.textContent = `Duration: ${Number(event.duration).toFixed(2)}s`;
     }
   }
@@ -365,8 +577,10 @@ function updateStatus(event) {
 }
 
 function renderOutputs(results) {
-  const container = document.getElementById('output-list');
-  document.getElementById('outputs').style.display = 'block';
+  const tab = getActiveTab();
+  if (!tab || !tab.elements.outputList || !tab.elements.outputs) return;
+  const container = tab.elements.outputList;
+  tab.elements.outputs.style.display = 'block';
   Object.entries(results || {}).forEach(([taskId, output]) => {
     const wrapper = document.createElement('div');
     wrapper.className = 'col-md-6 mb-3';
@@ -489,7 +703,10 @@ function renderOutputs(results) {
 }
 
 function appendLog(kind, message) {
-  if (!state.logEl) state.logEl = document.getElementById('log');
+  if (!state.logEl) {
+    const tab = getTab(state.currentRunId) || getTab(state.activeTabId);
+    if (tab) state.logEl = tab.elements.log;
+  }
   if (!state.logEl) return;
   const ts = new Date().toLocaleTimeString();
   const entry = document.createElement('div');
@@ -548,8 +765,39 @@ function markRunFinished() {
   if (!state.currentRunConfig) return;
   const btn = getButtonForConfig(state.currentRunConfig);
   if (btn) setButtonReady(btn);
+   const tab = getTab(state.currentRunId);
+   if (tab && tab.elements.runSummary) tab.elements.runSummary.innerText = 'Completed';
   state.currentRunConfig = null;
   state.currentRunId = null;
+}
+
+function attachToRunByConfig(configPath) {
+  const run = findRunByConfig(configPath);
+  if (run) attachToRun(run);
+}
+
+function findRunByConfig(configPath) {
+  if (!configPath || !state.runsByPath) return null;
+  if (state.runsByPath[configPath]) return state.runsByPath[configPath];
+  const entry = Object.entries(state.runsByPath).find(([key]) => key && (key === configPath || key.endsWith(configPath)));
+  return entry ? entry[1] : null;
+}
+
+function attachToRun(run) {
+  if (!run || run.run_id === state.currentRunId) return;
+  resetUI();
+  const configPath = run.request_path || run.config_path;
+  ensureTab(run.run_id, run.project || configPath);
+  activateTab(run.run_id);
+  state.currentRunConfig = configPath || '';
+  state.selectedConfig = configPath || state.selectedConfig;
+  const tab = getTab(run.run_id);
+  if (tab && tab.elements.runSummary) tab.elements.runSummary.innerText = run.completed ? 'Viewing completed run' : 'Attaching to run...';
+  const btn = getButtonForConfig(configPath) || getButtonForConfig(run.config_path);
+  if (btn) {
+    if (run.completed) setButtonReady(btn); else setButtonRunning(btn, run.run_id);
+  }
+  connectWebSocket(run.run_id);
 }
 
 function sanitizeMessage(msg) {

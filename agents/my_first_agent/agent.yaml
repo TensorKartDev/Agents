@@ -1,0 +1,29 @@
+# agent.yaml for my_first_agent
+name: "My First Agent"
+description: "This is my first amazing agent, loaded dynamically."
+icon: "icon.png"  # Path to the icon file relative to this YAML file.
+
+# The rest of this file is the standard agent/task/tool configuration
+# that will be used to run the agent.
+
+defaults:
+  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_params:
+    model: llama3.2
+
+agents:
+  my_first_agent_logic:
+    description: "The logic for my first agent."
+    tools: [my_first_agent_tool]
+
+tasks:
+  - id: my-first-task
+    agent: my_first_agent_logic
+    description: "Run my first agent's tool."
+    input: "some dynamic input"
+
+tools:
+  my_first_agent_tool:
+    # The type is relative to the agent's directory.
+    # The framework will need to handle this.
+    type: agent.MyFirstAgentTool

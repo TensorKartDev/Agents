@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict
+import sys
+from pathlib import Path
 
 from ..config import AgentSpec, ProjectConfig, instantiate_from_path
 from ..llm.provider import LLMProvider
@@ -27,6 +28,13 @@ class Orchestrator:
         except Exception:
             # keep startup resilient if discovery fails
             pass
+
+        # If this config is from an agent package, add its dir to the path
+        if self.config.file_path:
+            agent_dir = str(self.config.file_path.parent.resolve())
+            if agent_dir not in sys.path:
+                sys.path.insert(0, agent_dir)
+
         self.tool_registry.configure_from_specs(self.config.tool_specs)
         self.agents: Dict[str, Agent] = self._build_agents()
         self.tasks = self._build_tasks()

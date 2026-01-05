@@ -151,12 +151,25 @@ class ProjectConfig:
     agents: Dict[str, AgentSpec]
     tasks: List[TaskSpec]
     tool_specs: Dict[str, ToolSpec]
+    file_path: Optional[pathlib.Path] = None
 
     @classmethod
     def from_file(cls, path: str | pathlib.Path) -> "ProjectConfig":
-        data = yaml.safe_load(pathlib.Path(path).read_text())
+        p = pathlib.Path(path)
+        data = yaml.safe_load(p.read_text())
         if not isinstance(data, MutableMapping):
             raise ConfigError("Configuration root must be a mapping")
+        return cls.from_mapping(data, p)
+
+    @classmethod
+    def from_yaml(cls, content: str) -> "ProjectConfig":
+        data = yaml.safe_load(content)
+        if not isinstance(data, MutableMapping):
+            raise ConfigError("Configuration root must be a mapping")
+        return cls.from_mapping(data)
+
+    @classmethod
+    def from_mapping(cls, data: MutableMapping, path: Optional[pathlib.Path] = None) -> "ProjectConfig":
         agents = {
             name: AgentSpec.from_mapping(name, info)
             for name, info in (data.get("agents") or {}).items()
@@ -171,12 +184,13 @@ class ProjectConfig:
             for name, info in (data.get("tools") or {}).items()
         }
         return cls(
-            name=data.get("name", pathlib.Path(path).stem),
+            name=data.get("name", path.stem if path else "Untitled"),
             description=data.get("description"),
             defaults=DefaultsSpec.from_mapping(data.get("defaults")),
             agents=agents,
             tasks=tasks,
             tool_specs=tool_specs,
+            file_path=path,
         )
 
     def get_agent(self, name: str) -> AgentSpec:

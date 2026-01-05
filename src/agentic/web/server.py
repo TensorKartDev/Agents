@@ -8,11 +8,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+import yaml
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..agents.orchestrator import Orchestrator
@@ -20,10 +21,101 @@ from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
 
 
+import yaml
+from fastapi.responses import JSONResponse
+
+
 app = FastAPI(title="Agentic Web Runner")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent), name="static")
 
+BASE_DIR = Path(__file__).resolve().parents[2]  # repo root
+AGENTS_DIR = BASE_DIR / "agents"
+STATIC_IMG = Path(__file__).parent / "img"
 INDEX_HTML = Path(__file__).parent / "index.html"
+
+if AGENTS_DIR.exists():
+    # Mount so icons and assets inside agent folders can be served statically.
+    app.mount("/agents", StaticFiles(directory=AGENTS_DIR), name="agents")
+
+# Mount default static images (e.g., robot.svg) if present
+if STATIC_IMG.exists():
+    app.mount("/static/img", StaticFiles(directory=STATIC_IMG), name="static-img")
+
+
+@dataclass
+class AgentInfo:
+    id: str
+    name: str
+    description: str
+    icon: str
+    config_path: str
+
+
+def _load_manifest(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        with path.open() as f:
+            data = yaml.safe_load(f)
+            if not isinstance(data, dict):
+                return None
+            return data
+    except Exception:
+        return None
+
+
+def scan_for_agents() -> List[AgentInfo]:
+    """Scan the 'agents' directory for agent packages."""
+    agents: List[AgentInfo] = []
+    if not AGENTS_DIR.exists():
+        return agents
+
+    for agent_dir in AGENTS_DIR.iterdir():
+        if not agent_dir.is_dir():
+            continue
+
+        manifest_path = agent_dir / "agent.yaml"
+        if not manifest_path.exists():
+            manifest_path = agent_dir / "agent.yml"
+        if not manifest_path.exists():
+            continue
+
+        manifest = _load_manifest(manifest_path)
+        if not manifest:
+            continue
+
+        icon_field = manifest.get("icon")
+        icon_candidate = agent_dir / icon_field if icon_field else None
+        icon_path = (
+            f"/agents/{agent_dir.name}/{icon_field}"
+            if icon_candidate and icon_candidate.exists()
+            else "/static/img/robot.svg"
+        )
+
+        config_path_value = manifest.get("config_path") or manifest.get("config")
+        config_path = (agent_dir / config_path_value) if config_path_value else manifest_path
+        # Prefer an absolute path for downstream consumers (/api/run expects a real file)
+        config_path = config_path.resolve()
+        if not config_path.exists():
+            # Skip invalid entries; keep UI clean for creators
+            continue
+
+        agents.append(
+            AgentInfo(
+                id=agent_dir.name,
+                name=manifest.get("name", agent_dir.name.replace("_", " ").title()),
+                description=manifest.get("description", ""),
+                icon=icon_path,
+                config_path=str(config_path),
+            )
+        )
+
+    return agents
+
+
+@app.get("/api/agents")
+async def list_agents() -> JSONResponse:
+    """Return a list of discoverable agents."""
+    agents = scan_for_agents()
+    return JSONResponse([agent.__dict__ for agent in agents])
 
 
 @dataclass
@@ -195,6 +287,8 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     try:
         for event in state.history:
             await websocket.send_text(json.dumps(event))
+        if state.completed:
+            return
         while True:
             event = await queue.get()
             await websocket.send_text(json.dumps(event))
@@ -205,8 +299,6 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     finally:
         if queue in state.subscribers:
             state.subscribers.remove(queue)
-        if state.completed and not state.subscribers:
-            RUNS.pop(run_id, None)
         await websocket.close()
 
 
