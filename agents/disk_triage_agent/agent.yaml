@@ -1,0 +1,4 @@
+name: "Disk Triage Agent"
+description: "Assesses disk usage and recommends cleanup targets."
+icon: "icon.png"
+config_path: config.yaml

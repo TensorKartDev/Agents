@@ -14,13 +14,6 @@ function getActiveTab() {
   return getTab(state.currentRunId) || getTab(state.activeTabId);
 }
 
-const configPresets = [
-  { id: 'edge_inference', name: 'Edge Inference Agent', description: 'Edge inference workflow', icon: '/static/img/robot.svg', config_path: 'examples/configs/edge_inference.yaml' },
-  { id: 'firmware_pen_test', name: 'Firmware Penetration Testing Agent', description: 'Firmware security testing', icon: '/static/img/robot.svg', config_path: 'examples/configs/firmware_workflow.yaml' },
-  { id: 'hardware_pen_test', name: 'Hardware Penetration Testing Agent', description: 'Hardware security testing', icon: '/static/img/robot.svg', config_path: 'examples/configs/hardware_pen_test.yaml' },
-  { id: 'sales_order_investigation', name: 'Sales Order Investigation Agent', description: 'Sales order analysis', icon: '/static/img/robot.svg', config_path: 'examples/configs/sales_order_investigation.yaml' },
-];
-
 function getTab(runId) {
   return runId ? state.tabs[runId] : null;
 }
@@ -146,16 +139,10 @@ async function fetchAndRenderAgents() {
     const response = await fetch("/api/agents");
     const agents = await response.json();
     const list = Array.isArray(agents) ? agents : [];
-    const merged = [
-      ...list,
-      ...configPresets.filter(
-        preset => !list.some(agent => (agent.id && agent.id === preset.id) || (agent.config_path && agent.config_path === preset.config_path))
-      ),
-    ];
-    renderConfigCards(merged);
+    renderConfigCards(list);
   } catch (error) {
     console.error("Error fetching agents:", error);
-    renderConfigCards(configPresets);
+    renderConfigCards([]);
   }
 }
 

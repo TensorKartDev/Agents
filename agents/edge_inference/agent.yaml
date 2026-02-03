@@ -1,0 +1,4 @@
+name: "Edge Inference Agent"
+description: "Edge inference workflow."
+icon: "icon.png"
+config_path: config.yaml

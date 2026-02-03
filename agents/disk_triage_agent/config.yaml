@@ -1,0 +1,23 @@
+name: Disk Triage Workflow
+description: Disk usage triage that uses df/du output to decide cleanup guidance.
+
+defaults:
+  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_params:
+    model: llama3.2
+
+agents:
+  disk_triage_agent:
+    description: "Detects disk pressure and highlights large directories."
+    tools: [disk_usage_triage]
+
+tasks:
+  - id: disk-usage-triage
+    agent: disk_triage_agent
+    description: "Check disk usage and recommend cleanup targets based on df/du results."
+    input: |
+      {"path": "/", "top_n": 5, "timeout": 40}
+
+tools:
+  disk_usage_triage:
+    type: agentic.tools.builtin:DiskUsageTriageTool

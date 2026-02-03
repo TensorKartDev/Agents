@@ -1,0 +1,4 @@
+name: "Sales Order Investigation Agent"
+description: "Sales order analysis."
+icon: "icon.png"
+config_path: config.yaml
