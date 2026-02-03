@@ -21,15 +21,12 @@ from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
 
 
-import yaml
-from fastapi.responses import JSONResponse
-
-
 app = FastAPI(title="Agentic Web Runner")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent), name="static")
 
-BASE_DIR = Path(__file__).resolve().parents[2]  # repo root
+BASE_DIR = Path(__file__).resolve().parents[3]  # repo root
 AGENTS_DIR = BASE_DIR / "agents"
+AGENT_REGISTRY = AGENTS_DIR / "agents.yaml"
 STATIC_IMG = Path(__file__).parent / "img"
 INDEX_HTML = Path(__file__).parent / "index.html"
 
@@ -49,6 +46,8 @@ class AgentInfo:
     description: str
     icon: str
     config_path: str
+    llm_host: Optional[str] = None
+    tool_host: Optional[str] = None
 
 
 def _load_manifest(path: Path) -> Optional[Dict[str, Any]]:
@@ -68,8 +67,28 @@ def scan_for_agents() -> List[AgentInfo]:
     if not AGENTS_DIR.exists():
         return agents
 
+    registry_path = AGENT_REGISTRY
+    if not registry_path.exists():
+        alt = AGENTS_DIR / "Agents.yaml"
+        if alt.exists():
+            registry_path = alt
+        else:
+            alt = AGENTS_DIR / "Agents.YAML"
+            if alt.exists():
+                registry_path = alt
+            else:
+                alt = AGENTS_DIR / "registry.yaml"
+                if alt.exists():
+                    registry_path = alt
+    registry_data = _load_manifest(registry_path) if registry_path.exists() else None
+    allowed = set(registry_data.get("agents", [])) if registry_data else set()
+    if not allowed:
+        return agents
+
     for agent_dir in AGENTS_DIR.iterdir():
         if not agent_dir.is_dir():
+            continue
+        if agent_dir.name not in allowed:
             continue
 
         manifest_path = agent_dir / "agent.yaml"
@@ -105,6 +124,8 @@ def scan_for_agents() -> List[AgentInfo]:
                 description=manifest.get("description", ""),
                 icon=icon_path,
                 config_path=str(config_path),
+                llm_host=manifest.get("llm_host"),
+                tool_host=manifest.get("tool_host"),
             )
         )
 

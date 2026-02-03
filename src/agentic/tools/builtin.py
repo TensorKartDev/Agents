@@ -639,6 +639,99 @@ class WeaknessProfilerTool(Tool):
         return ToolResult(content="\n".join(details), metadata=metadata)
 
 
+class DiskUsageTriageTool(Tool):
+    """Uses df/du to assess disk usage and recommend cleanup targets."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        if not _command_available("df") or not _command_available("du"):
+            return ToolResult(
+                content="Missing required tools: ensure both df and du are available on PATH.",
+                metadata={"error": "missing_tools"},
+            )
+
+        path_value = payload.get("path") or self.config.get("path") or "/"
+        target = Path(str(path_value))
+        if not target.exists():
+            return ToolResult(content=f"Path {target} not found.", metadata={"error": "missing_path"})
+        if not target.is_dir():
+            return ToolResult(content=f"{target} is not a directory.", metadata={"error": "not_directory"})
+
+        df_result = _run_command(["df", "-P", "-k", str(target)])
+        df_summary = _summarize("df -P -k", df_result)
+        if df_result.get("code") != 0:
+            return ToolResult(content=df_summary, metadata={"error": "df_failed"})
+
+        percent_used: int | None = None
+        available_kb: int | None = None
+        stdout_lines = df_result.get("stdout", "").splitlines()
+        if len(stdout_lines) >= 2:
+            for line in stdout_lines[1:]:
+                columns = [col for col in line.split() if col]
+                percent_column = next((col for col in columns if col.endswith("%")), None)
+                if percent_column:
+                    try:
+                        percent_used = int(percent_column.strip("%"))
+                    except ValueError:
+                        percent_used = None
+                if len(columns) >= 5:
+                    try:
+                        available_kb = int(columns[3])
+                    except ValueError:
+                        available_kb = None
+                if percent_used is not None:
+                    break
+
+        status = "unknown"
+        if percent_used is not None:
+            if percent_used >= 85:
+                status = "critical"
+            elif percent_used >= 70:
+                status = "warning"
+            else:
+                status = "ok"
+
+        output_sections: List[str] = [df_summary]
+        metadata: Dict[str, str] = {"path": str(target), "status": status}
+        if percent_used is not None:
+            metadata["percent_used"] = str(percent_used)
+        if available_kb is not None:
+            metadata["available_kb"] = str(available_kb)
+
+        if status in {"warning", "critical"}:
+            timeout = int(payload.get("timeout", 40))
+            du_result = _run_command(["du", "-x", "-k", "-d", "1", str(target)], timeout=timeout)
+            output_sections.append(_summarize("du -x -k -d 1", du_result))
+            largest: List[tuple[int, str]] = []
+            for line in du_result.get("stdout", "").splitlines():
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    size_kb = int(parts[0])
+                except ValueError:
+                    continue
+                path = parts[1]
+                if path == str(target):
+                    continue
+                largest.append((size_kb, path))
+            largest.sort(key=lambda item: item[0], reverse=True)
+            if largest:
+                top_n = int(payload.get("top_n", 5))
+                report_lines = []
+                for size_kb, path in largest[:top_n]:
+                    size_mb = size_kb / 1024
+                    report_lines.append(f"- {path}: {size_mb:.1f} MiB")
+                output_sections.append("Top directories by size:\n" + "\n".join(report_lines))
+        else:
+            output_sections.append("Disk usage within acceptable thresholds; no cleanup required.")
+
+        return ToolResult(content="\n\n".join(output_sections), metadata=metadata)
+
+
 class VerificationPlannerTool(Tool):
     """Creates a test/verify checklist from earlier findings."""
 
@@ -686,6 +779,9 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
     registry.register_factory("secret_scanner", lambda: SecretScannerTool(name="secret_scanner"), overwrite=True)
     registry.register_factory(
         "weakness_profiler", lambda: WeaknessProfilerTool(name="weakness_profiler"), overwrite=True
+    )
+    registry.register_factory(
+        "disk_usage_triage", lambda: DiskUsageTriageTool(name="disk_usage_triage"), overwrite=True
     )
     registry.register_factory(
         "verification_planner", lambda: VerificationPlannerTool(name="verification_planner"), overwrite=True

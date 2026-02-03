@@ -1,0 +1,4 @@
+name: "Firmware Penetration Agent"
+description: "Firmware security testing workflow."
+icon: "icon.png"
+config_path: config.yaml
