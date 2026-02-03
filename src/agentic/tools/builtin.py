@@ -660,7 +660,8 @@ class DiskUsageTriageTool(Tool):
         if not target.is_dir():
             return ToolResult(content=f"{target} is not a directory.", metadata={"error": "not_directory"})
 
-        df_result = _run_command(["df", "-P", "-k", str(target)])
+        df_cmd = ["df", "-P", "-k", str(target)]
+        df_result = _run_command(df_cmd)
         df_summary = _summarize("df -P -k", df_result)
         if df_result.get("code") != 0:
             return ToolResult(content=df_summary, metadata={"error": "df_failed"})
@@ -694,7 +695,12 @@ class DiskUsageTriageTool(Tool):
             else:
                 status = "ok"
 
-        output_sections: List[str] = [df_summary]
+        output_sections: List[str] = [
+            f"Executed on host: {context.metadata.get('host', 'local')}",
+            f"Working path: {target}",
+            f"Command: {' '.join(df_cmd)}",
+            df_summary,
+        ]
         metadata: Dict[str, str] = {"path": str(target), "status": status}
         if percent_used is not None:
             metadata["percent_used"] = str(percent_used)
@@ -703,7 +709,9 @@ class DiskUsageTriageTool(Tool):
 
         if status in {"warning", "critical"}:
             timeout = int(payload.get("timeout", 40))
-            du_result = _run_command(["du", "-x", "-k", "-d", "1", str(target)], timeout=timeout)
+            du_cmd = ["du", "-x", "-k", "-d", "1", str(target)]
+            du_result = _run_command(du_cmd, timeout=timeout)
+            output_sections.append(f"Command: {' '.join(du_cmd)}")
             output_sections.append(_summarize("du -x -k -d 1", du_result))
             largest: List[tuple[int, str]] = []
             for line in du_result.get("stdout", "").splitlines():
@@ -728,6 +736,43 @@ class DiskUsageTriageTool(Tool):
                 output_sections.append("Top directories by size:\n" + "\n".join(report_lines))
         else:
             output_sections.append("Disk usage within acceptable thresholds; no cleanup required.")
+
+        min_mb = int(payload.get("min_mb", 100))
+        find_cmd = [
+            "find",
+            str(target),
+            "-xdev",
+            "-type",
+            "f",
+            "-size",
+            f"+{min_mb}M",
+            "-printf",
+            "%s %p\n",
+        ]
+        find_result = _run_command(find_cmd, timeout=int(payload.get("timeout", 40)))
+        output_sections.append(f"Command: {' '.join(find_cmd)}")
+        output_sections.append(_summarize(f"find files > {min_mb}M", find_result))
+
+        large_files: List[tuple[int, str]] = []
+        for line in find_result.get("stdout", "").splitlines():
+            parts = line.split(" ", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                size_bytes = int(parts[0])
+            except ValueError:
+                continue
+            large_files.append((size_bytes, parts[1]))
+        large_files.sort(key=lambda item: item[0], reverse=True)
+        if large_files:
+            top_files = int(payload.get("top_files", 10))
+            lines = []
+            for size_bytes, path in large_files[:top_files]:
+                size_mb = size_bytes / (1024 * 1024)
+                lines.append(f"- {path}: {size_mb:.1f} MiB")
+            output_sections.append(f"Largest files (> {min_mb} MiB):\n" + "\n".join(lines))
+        else:
+            output_sections.append(f"No files larger than {min_mb} MiB found under {target}.")
 
         return ToolResult(content="\n\n".join(output_sections), metadata=metadata)
 

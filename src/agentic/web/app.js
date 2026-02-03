@@ -169,32 +169,16 @@ function renderConfigCards(agents) {
   container.innerHTML = ""; // Clear existing cards
   agents.forEach((agent) => {
     const col = document.createElement("div");
-    col.className = "col-sm-6 col-lg-3";
+    col.className = "col-6 col-sm-4 col-md-3 col-lg-2 col-xl-2";
 
     const card = document.createElement("div");
-    card.className = "config-card";
+    card.className = "config-card compact";
     card.dataset.config = agent.config_path;
     card.onclick = () => selectConfig(agent, card, true);
-
-    const icon = document.createElement("div");
-    icon.className = "config-card-icon";
-    const img = document.createElement("img");
-    img.src = agent.icon;
-    img.style.width = "48px";
-    img.style.height = "48px";
-    icon.appendChild(img);
 
     const title = document.createElement("div");
     title.className = "config-card-title";
     title.textContent = agent.name;
-
-    const desc = document.createElement("div");
-    desc.className = "config-card-desc";
-    desc.textContent = agent.description;
-
-    const badge = document.createElement("div");
-    badge.className = "config-card-agent-badge";
-    badge.textContent = agent.id;
 
     const actions = document.createElement("div");
     actions.className = "w-100";
@@ -210,10 +194,7 @@ function renderConfigCards(agents) {
     };
     actions.appendChild(startBtn);
 
-    card.appendChild(icon);
     card.appendChild(title);
-    card.appendChild(desc);
-    card.appendChild(badge);
     card.appendChild(actions);
     col.appendChild(card);
     container.appendChild(col);
@@ -553,119 +534,24 @@ function renderOutputs(results) {
   tab.elements.outputs.style.display = 'block';
   Object.entries(results || {}).forEach(([taskId, output]) => {
     const wrapper = document.createElement('div');
-    wrapper.className = 'col-md-6 mb-3';
+    wrapper.className = 'col-12 mb-3';
 
     const card = document.createElement('div');
     card.className = 'output-card';
-
-    const header = document.createElement('div');
-    header.className = 'output-header mb-2';
-
-    const title = document.createElement('div');
-    const h = document.createElement('h4');
-    h.className = 'text-info mb-0';
-    h.textContent = taskId;
-    title.appendChild(h);
-
-    const actions = document.createElement('div');
-    actions.className = 'output-actions';
-
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'btn btn-sm btn-outline-secondary';
-    copyBtn.textContent = 'Copy';
-    copyBtn.onclick = () => navigator.clipboard.writeText(output && output.output !== undefined ? output.output : output).catch(()=>{});
-
-    const dlBtn = document.createElement('button');
-    dlBtn.className = 'btn btn-sm btn-outline-secondary';
-    dlBtn.textContent = 'Download';
-    dlBtn.onclick = () => {
-      const raw = output && output.output !== undefined ? output.output : output;
-      const blob = new Blob([raw ?? ''], {type: 'text/plain'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${taskId}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    };
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.className = 'btn btn-sm btn-info text-white';
-    toggleBtn.textContent = 'Show full';
-
-    actions.appendChild(copyBtn);
-    actions.appendChild(dlBtn);
-    actions.appendChild(toggleBtn);
-
-    header.appendChild(title);
-    header.appendChild(actions);
-
-    const meta = document.createElement('div');
-    meta.className = 'output-meta mb-2';
-    let durationText = '';
-    let sizeText = '';
-    if (output && typeof output === 'object' && output.output !== undefined) {
-      if (output.duration !== undefined) durationText = `Duration: ${output.duration.toFixed(2)}s`;
-      const raw = output.output == null ? '' : String(output.output);
-      sizeText = `Size: ${raw.length} bytes`;
-    } else {
-      const raw = output == null ? '' : String(output);
-      sizeText = `Size: ${raw.length} bytes`;
-    }
-    meta.textContent = [durationText, sizeText].filter(Boolean).join(' \u007F ');
 
     const pre = document.createElement('pre');
     pre.className = 'output-pre mb-0';
 
     let rawOutput = output && typeof output === 'object' && output.output !== undefined ? output.output : output;
     let display = rawOutput == null ? '' : String(rawOutput);
-    let isJson = false;
-    try {
-      const parsed = JSON.parse(display);
-      display = JSON.stringify(parsed, null, 2);
-      isJson = true;
-    } catch (e) {
-      // not JSON
-    }
 
-    const TRUNC = 800;
-    let fullShown = false;
+    const TRUNC = 1200;
     if (display.length > TRUNC) {
       pre.textContent = display.slice(0, TRUNC) + '\n\n... (truncated)';
-      toggleBtn.textContent = 'Show full';
     } else {
-      if (isJson) {
-        pre.innerHTML = highlightJSON(display);
-      } else {
-        pre.textContent = display;
-      }
-      toggleBtn.style.display = 'none';
+      pre.textContent = display;
     }
 
-    toggleBtn.onclick = () => {
-      if (!fullShown) {
-        if (isJson) {
-          pre.innerHTML = highlightJSON(display);
-        } else {
-          pre.textContent = display;
-        }
-        toggleBtn.textContent = 'Collapse';
-        fullShown = true;
-      } else {
-        if (display.length > TRUNC) {
-          pre.textContent = display.slice(0, TRUNC) + '\n\n... (truncated)';
-        } else {
-          if (isJson) pre.innerHTML = highlightJSON(display); else pre.textContent = display;
-        }
-        toggleBtn.textContent = 'Show full';
-        fullShown = false;
-      }
-    };
-
-    card.appendChild(header);
-    card.appendChild(meta);
     card.appendChild(pre);
     wrapper.appendChild(card);
     container.appendChild(wrapper);

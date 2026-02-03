@@ -16,7 +16,7 @@ tasks:
     agent: disk_triage_agent
     description: "Check disk usage and recommend cleanup targets based on df/du results."
     input: |
-      {"path": "/", "top_n": 5, "timeout": 40}
+      {"path": "/", "top_n": 5, "top_files": 10, "min_mb": 100, "timeout": 40}
 
 tools:
   disk_usage_triage:
