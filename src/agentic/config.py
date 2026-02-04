@@ -93,12 +93,27 @@ class TaskSpec:
     input: Any = None
     context: Dict[str, Any] = field(default_factory=dict)
     expected_output: Optional[str] = None
+    depends_on: List[str] = field(default_factory=list)
+    task_type: Optional[str] = None
+    reason: Optional[str] = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "TaskSpec":
         missing = [key for key in ("id", "agent", "description") if key not in data]
         if missing:
             raise ConfigError(f"Task is missing required keys: {', '.join(missing)}")
+        raw_depends = data.get("depends_on") or []
+        if isinstance(raw_depends, str):
+            depends_on = [raw_depends]
+        else:
+            depends_on = [str(item) for item in raw_depends]
+        task_type = data.get("type") or data.get("task_type")
+        if isinstance(task_type, str):
+            normalized = task_type.strip().lower()
+            if normalized in {"humanapprovaltask", "human_approval", "human-approval", "approval"}:
+                task_type = "human_approval"
+        else:
+            task_type = None
         return cls(
             id=str(data["id"]),
             agent=str(data["agent"]),
@@ -106,6 +121,9 @@ class TaskSpec:
             input=data.get("input"),
             context=dict(data.get("context", {})),
             expected_output=data.get("expected_output"),
+            depends_on=depends_on,
+            task_type=task_type,
+            reason=data.get("reason"),
         )
 
 

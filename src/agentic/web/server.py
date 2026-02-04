@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
+from ..tasks.runner import TaskRunner
 
 
 app = FastAPI(title="Agentic Web Runner")
@@ -231,7 +232,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         }
     )
 
-    task_specs = list(config.tasks)
+    task_specs = TaskRunner.order_tasks(list(config.tasks))
     results: Dict[str, Any] = {}
     run_start = time.perf_counter()
     stopped_early = False
@@ -256,6 +257,20 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     try:
       for spec in task_specs:
         if state.stop_requested:
+          stopped_early = True
+          break
+        if getattr(spec, "task_type", None) == "human_approval":
+          wait_msg = f"WAITING_HUMAN: {getattr(spec, 'reason', '') or ''}".strip()
+          results[spec.id] = {"output": wait_msg, "duration": 0}
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "WAITING_HUMAN",
+              "output": wait_msg,
+              "duration": 0,
+            }
+          )
           stopped_early = True
           break
         await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})

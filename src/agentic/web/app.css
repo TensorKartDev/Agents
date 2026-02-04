@@ -27,6 +27,7 @@ body::before {
 .status-pending { color: #f97316; }
 .status-thinking { color: #0ea5e9; animation: pulse 1.5s infinite; }
 .status-completed { color: #10b981; }
+.status-waiting { color: #eab308; }
 .console-log { background: rgba(15,23,42,0.04); color: #0f172a; font-family: "JetBrains Mono", monospace; padding: 0.85rem; border-radius: 12px; flex: 1 1 auto; min-height: 0; overflow-y: auto; max-height: 62vh; border: 1px solid rgba(15,23,42,0.06); }
 .progress-bar { transition: width 0.6s ease-in-out; }
 .output-card { border: 1px solid rgba(15,23,42,0.08); border-radius: 12px; padding: 0.85rem; background: rgba(255,255,255,0.9); }

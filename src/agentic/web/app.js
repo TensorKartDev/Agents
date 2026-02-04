@@ -502,13 +502,16 @@ function updateStatus(event) {
   if (!tab) return;
   const row = tab.statusRows[event.task_id];
   if (!row) return;
-  row.label.classList.remove('status-pending', 'status-thinking', 'status-completed');
+  row.label.classList.remove('status-pending', 'status-thinking', 'status-completed', 'status-waiting');
   let width = '0%';
   if (event.status === 'pending') {
     row.label.classList.add('status-pending');
     width = '0%';
   } else if (event.status === 'thinking') {
     row.label.classList.add('status-thinking');
+    width = '60%';
+  } else if (event.status === 'WAITING_HUMAN' || event.status === 'waiting_human') {
+    row.label.classList.add('status-waiting');
     width = '60%';
   } else if (event.status === 'completed') {
     row.label.classList.add('status-completed');

@@ -76,18 +76,39 @@ def _validate_path(path: Path) -> str | None:
 
 
 class NmapScanTool(Tool):
-    """Simulated nmap scan that returns surface insights for hardware."""
+    """Runs an nmap scan and summarizes the output."""
 
     def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
-        target = input_text or self.config.get("target", "device.local")
-        open_ports = self.config.get("open_ports", [22, 80, 443])
-        firmware = self.config.get("firmware", "unknown")
-        report = (
-            f"Scan summary for {target}: open ports {open_ports}. "
-            f"Firmware fingerprint {firmware}. Recommend following up on SSH hardening."
-        )
+        if not _command_available("nmap"):
+            return ToolResult(
+                content="Missing required tool: ensure nmap is available on PATH.",
+                metadata={"error": "missing_tools"},
+            )
+
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        target = payload.get("target") or self.config.get("target") or input_text or "127.0.0.1"
+        args = payload.get("args") or self.config.get("args") or ["-sV"]
+        ports = payload.get("ports") or self.config.get("ports")
+        timeout = int(payload.get("timeout", 120))
+
+        cmd: List[str] = ["nmap"]
+        if isinstance(args, list):
+            cmd.extend(str(item) for item in args)
+        else:
+            cmd.extend(str(args).split())
+        if ports:
+            cmd.extend(["-p", str(ports)])
+        cmd.append(str(target))
+
+        result = _run_command(cmd, timeout=timeout)
+        summary = _summarize("nmap", result)
         metadata = {"target": str(target)}
-        return ToolResult(content=report, metadata=metadata)
+        if result.get("code") != 0:
+            metadata["error"] = "nmap_failed"
+        return ToolResult(content=summary, metadata=metadata)
 
 
 class FirmwareDiffTool(Tool):

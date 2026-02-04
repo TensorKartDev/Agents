@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import typer
 from rich.console import Console
@@ -12,6 +13,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from .agents.orchestrator import Orchestrator
 from .autogen_runner import AutogenOrchestrator
 from .config import ProjectConfig
+from .tasks.base import TaskState
+from .tasks.runner import TaskRunner
 
 app = typer.Typer(help="Agentic template CLI")
 console = Console()
@@ -48,20 +51,20 @@ def run(
         transient=False,
     )
 
+    interactive = sys.stdin.isatty()
+
+    def approval_prompt(task) -> bool:
+        reason = getattr(task, "reason", "") or "Approval required."
+        console.print(f"[yellow]Human approval required[/]: {reason}")
+        return typer.confirm("Approve and continue?", default=False)
+
+    approval_callback = approval_prompt if interactive else None
+
     if engine == "legacy":
         orchestrator = Orchestrator(config)
-        task_lookup = {task.id: task for task in orchestrator.tasks}
-
-        def runner(task_spec):
-            task_obj = task_lookup[task_spec.id]
-            result = orchestrator.runner.run(task_obj)
-            return result.output
-
+        orchestrator.runner._approval_callback = approval_callback
     else:
-        orchestrator = AutogenOrchestrator(config)
-
-        def runner(task_spec):
-            return orchestrator.run_task(task_spec)
+        orchestrator = AutogenOrchestrator(config, approval_callback=approval_callback)
 
     with progress:
         progress_tasks = {
@@ -70,11 +73,25 @@ def run(
             )
             for task_spec in task_specs
         }
-        for task_spec in task_specs:
-            progress.update(progress_tasks[task_spec.id], status="[cyan]thinking...", start=True)
-            output = runner(task_spec)
-            results[task_spec.id] = output
-            progress.update(progress_tasks[task_spec.id], status="[green]completed ✅")
+        if engine == "legacy":
+            for task_spec in task_specs:
+                progress.update(progress_tasks[task_spec.id], status="[cyan]queued", start=True)
+            run_results = orchestrator.runner.run_all(orchestrator.tasks)
+            for task_id, result in run_results.items():
+                results[task_id] = result.output
+                status = "[green]completed ✅" if result.state == TaskState.COMPLETED else "[red]failed"
+                if result.state == TaskState.WAITING_HUMAN:
+                    status = "[yellow]waiting for approval"
+                progress.update(progress_tasks[task_id], status=status)
+        else:
+            for task_spec in task_specs:
+                progress.update(progress_tasks[task_spec.id], status="[cyan]queued", start=True)
+            results = orchestrator.run()
+            for task_id, output in results.items():
+                status = "[green]completed ✅"
+                if isinstance(output, str) and output.startswith("WAITING_HUMAN"):
+                    status = "[yellow]waiting for approval"
+                progress.update(progress_tasks[task_id], status=status)
 
     table = Table(title="Task outputs", show_lines=True)
     table.add_column("Task ID")

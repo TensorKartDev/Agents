@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import textwrap
+from pathlib import Path
 from typing import Any, Dict
 
 from autogen import AssistantAgent, UserProxyAgent
 
 from .config import AgentSpec, ProjectConfig
+from .tasks.runner import TaskRunner, TaskStateRecord, TaskStateStore
+from .tasks.base import TaskState
 from .tools.base import ToolContext
 from .tools.builtin import register_builtin_tools
 from .tools.registry import ToolRegistry
@@ -17,16 +20,80 @@ from .tools.registry import ToolRegistry
 class AutogenOrchestrator:
     """Runs project tasks using Microsoft Autogen agents backed by Ollama."""
 
-    def __init__(self, project_config: ProjectConfig) -> None:
+    def __init__(self, project_config: ProjectConfig, approval_callback=None) -> None:
         self.config = project_config
         self.tool_registry = ToolRegistry()
         register_builtin_tools(self.tool_registry)
         self.tool_registry.configure_from_specs(self.config.tool_specs)
+        self._store = TaskStateStore(Path(".agentic") / "task_state.db")
+        self._approval_callback = approval_callback
 
     def run(self) -> Dict[str, str]:
         outputs: Dict[str, str] = {}
-        for task_spec in self.config.tasks:
-            outputs[task_spec.id] = self.run_task(task_spec)
+        ordered = TaskRunner.order_tasks(self.config.tasks)
+        for task_spec in ordered:
+            self._store.upsert(TaskStateRecord(task_id=task_spec.id, state=TaskState.PENDING))
+        for task_spec in ordered:
+            if task_spec.task_type == "human_approval":
+                existing = self._store.fetch(task_spec.id)
+                if existing and existing.approved:
+                    outputs[task_spec.id] = "Approved"
+                    self._store.upsert(
+                        TaskStateRecord(
+                            task_id=task_spec.id,
+                            state=TaskState.COMPLETED,
+                            output="Approved",
+                            approved=True,
+                            reason=task_spec.reason,
+                        )
+                    )
+                    continue
+                if self._approval_callback is not None:
+                    decision = self._approval_callback(task_spec)
+                    if decision:
+                        outputs[task_spec.id] = "Approved"
+                        self._store.upsert(
+                            TaskStateRecord(
+                                task_id=task_spec.id,
+                                state=TaskState.COMPLETED,
+                                output="Approved",
+                                approved=True,
+                                reason=task_spec.reason,
+                            )
+                        )
+                        continue
+                wait_msg = f"WAITING_HUMAN: {task_spec.reason or ''}".strip()
+                outputs[task_spec.id] = wait_msg
+                self._store.upsert(
+                    TaskStateRecord(
+                        task_id=task_spec.id,
+                        state=TaskState.WAITING_HUMAN,
+                        output=wait_msg,
+                        approved=False,
+                        reason=task_spec.reason,
+                    )
+                )
+                break
+
+            self._store.upsert(TaskStateRecord(task_id=task_spec.id, state=TaskState.RUNNING))
+            try:
+                outputs[task_spec.id] = self.run_task(task_spec)
+                self._store.upsert(
+                    TaskStateRecord(
+                        task_id=task_spec.id,
+                        state=TaskState.COMPLETED,
+                        output=outputs[task_spec.id],
+                    )
+                )
+            except Exception as exc:
+                self._store.upsert(
+                    TaskStateRecord(
+                        task_id=task_spec.id,
+                        state=TaskState.FAILED,
+                        error=str(exc),
+                    )
+                )
+                raise
         return outputs
 
     def run_task(self, task_spec) -> str:

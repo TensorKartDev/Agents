@@ -8,7 +8,7 @@ from pathlib import Path
 from ..config import AgentSpec, ProjectConfig, instantiate_from_path
 from ..llm.provider import LLMProvider
 from ..memory.simple import ConversationBufferMemory
-from ..tasks.base import Task
+from ..tasks.base import HumanApprovalTask, Task
 from ..tasks.runner import TaskRunner
 from ..tools.builtin import register_builtin_tools
 from ..tools.registry import ToolRegistry
@@ -80,6 +80,20 @@ class Orchestrator:
     def _build_tasks(self) -> list[Task]:
         items: list[Task] = []
         for spec in self.config.tasks:
+            if spec.task_type == "human_approval":
+                items.append(
+                    HumanApprovalTask(
+                        id=spec.id,
+                        description=spec.description,
+                        agent_name=spec.agent,
+                        input=spec.input,
+                        context=spec.context,
+                        expected_output=spec.expected_output,
+                        depends_on=spec.depends_on,
+                        reason=spec.reason or "",
+                    )
+                )
+                continue
             items.append(
                 Task(
                     id=spec.id,
@@ -88,13 +102,14 @@ class Orchestrator:
                     input=spec.input,
                     context=spec.context,
                     expected_output=spec.expected_output,
+                    depends_on=spec.depends_on,
                 )
             )
         return items
 
     def run(self) -> Dict[str, str]:
         outputs: Dict[str, str] = {}
-        for task in self.tasks:
-            result = self.runner.run(task)
-            outputs[task.id] = result.output
+        results = self.runner.run_all(self.tasks)
+        for task_id, result in results.items():
+            outputs[task_id] = result.output
         return outputs
