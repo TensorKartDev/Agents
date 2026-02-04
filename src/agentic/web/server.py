@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from ..agents.manifest import normalize_manifest, validate_manifest
 from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
@@ -49,14 +50,27 @@ class AgentInfo:
     config_path: str
     llm_host: Optional[str] = None
     tool_host: Optional[str] = None
+    inputs: Optional[Any] = None
+    outputs: Optional[Any] = None
+    capabilities: Optional[List[str]] = None
+    version: Optional[str] = None
+    compatibility: Optional[Dict[str, Any]] = None
+    pricing: Optional[Dict[str, Any]] = None
 
 
-def _load_manifest(path: Path) -> Optional[Dict[str, Any]]:
+def _load_manifest(path: Path, *, validate: bool = True) -> Optional[Dict[str, Any]]:
     try:
         with path.open() as f:
             data = yaml.safe_load(f)
             if not isinstance(data, dict):
                 return None
+            if validate:
+                errors = validate_manifest(data)
+                if errors:
+                    msg = "; ".join(errors)
+                    print(f"[agentic] Invalid agent manifest {path}: {msg}")
+                    return None
+                return normalize_manifest(data)
             return data
     except Exception:
         return None
@@ -81,7 +95,7 @@ def scan_for_agents() -> List[AgentInfo]:
                 alt = AGENTS_DIR / "registry.yaml"
                 if alt.exists():
                     registry_path = alt
-    registry_data = _load_manifest(registry_path) if registry_path.exists() else None
+    registry_data = _load_manifest(registry_path, validate=False) if registry_path.exists() else None
     allowed = set(registry_data.get("agents", [])) if registry_data else set()
     if not allowed:
         return agents
@@ -127,6 +141,12 @@ def scan_for_agents() -> List[AgentInfo]:
                 config_path=str(config_path),
                 llm_host=manifest.get("llm_host"),
                 tool_host=manifest.get("tool_host"),
+                inputs=manifest.get("inputs"),
+                outputs=manifest.get("outputs"),
+                capabilities=manifest.get("capabilities"),
+                version=manifest.get("version"),
+                compatibility=manifest.get("compatibility"),
+                pricing=manifest.get("pricing"),
             )
         )
 

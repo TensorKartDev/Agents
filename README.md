@@ -191,6 +191,8 @@ Run in production with `uvicorn agentic.web.server:app --host 0.0.0.0 --port 800
 - Run the same config via CLI: `agentic run agents/<slug>/agent.yaml --engine autogen` (or `--engine legacy`).
 - See `docs/creating_agents.md` for a short, copy-pasteable template and validation tips.
 
+Manifest metadata such as `inputs`, `outputs`, `capabilities`, `version`, `compatibility`, and `pricing` is supported and validated when agents are discovered. Invalid manifests are skipped with user-friendly errors in the server logs.
+
 ## Testing
 
 Use the included `pytest` dependency to verify tools, planners, or integrations:
