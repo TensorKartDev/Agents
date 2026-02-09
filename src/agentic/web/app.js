@@ -75,6 +75,8 @@ function ensureTab(runId, label) {
           </div>
           <div data-role="tasks-list" class="vstack gap-3"></div>
         </div>
+        <div class="glass-card p-3 mb-3 input-card d-none" data-role="input-card"></div>
+        <div class="glass-card p-3 mb-3 input-card d-none" data-role="approval-card"></div>
       </div>
       <div class="col-12 mb-3">
         <div class="glass-card p-3" data-role="outputs" style="display:none;">
@@ -99,6 +101,8 @@ function ensureTab(runId, label) {
     engineLabel: pane.querySelector('[data-role="engine-label"]'),
     projectTitle: pane.querySelector('[data-role="project-title"]'),
     runSummary: pane.querySelector('[data-role="run-summary"]'),
+    inputCard: pane.querySelector('[data-role="input-card"]'),
+    approvalCard: pane.querySelector('[data-role="approval-card"]'),
   };
 
   const tabState = {
@@ -454,6 +458,12 @@ function handleEvent(event) {
     alert(event.message);
     appendLog('error', event.message);
     markRunFinished();
+  } else if (event.type === 'input_request') {
+    renderInputRequest(event);
+    appendLog('status', `Waiting for input: ${event.task_id}`);
+  } else if (event.type === 'approval_request') {
+    renderApprovalRequest(event);
+    appendLog('status', `Waiting for approval: ${event.task_id}`);
   }
 }
 
@@ -488,11 +498,13 @@ function renderPlan(event) {
       <div class="progress mt-3" style="height: 6px;">
         <div class="progress-bar bg-info" id="progress-${task.id}" style="width: 0%"></div>
       </div>
+      <div class="task-inline-panel mt-3 d-none" data-task-inline="${task.id}"></div>
     `;
     list.appendChild(card);
     tab.statusRows[task.id] = {
       label: card.querySelector(`#status-${task.id}`),
       bar: card.querySelector(`#progress-${task.id}`),
+      inline: card.querySelector(`[data-task-inline="${task.id}"]`),
     };
   });
 }
@@ -525,9 +537,266 @@ function updateStatus(event) {
       const durEl = tab.elements.pane.querySelector(`#duration-${event.task_id}`);
       if (durEl) durEl.textContent = `Duration: ${Number(event.duration).toFixed(2)}s`;
     }
+  } else if (event.status === 'failed') {
+    row.label.classList.add('status-failed');
+    width = '100%';
   }
   row.label.innerText = event.status;
   row.bar.style.width = width;
+
+  if (event.status === 'completed' || event.status === 'failed') {
+    clearInlinePanel(event.task_id);
+  }
+}
+
+function renderInputRequest(event) {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const row = tab.statusRows[event.task_id];
+  const card = row && row.inline ? row.inline : tab.elements.inputCard;
+  if (!card) return;
+  const ui = event.ui || {};
+  const title = ui.title || event.title || 'Input required';
+  const description = ui.description || event.description || '';
+  let fields = Array.isArray(ui.fields) ? ui.fields.slice() : [];
+  if (!fields.length) {
+    fields = [{ id: 'value', label: 'Value', kind: 'text', required: true }];
+  }
+
+  card.dataset.taskId = event.task_id || '';
+  card.classList.remove('d-none');
+  card.innerHTML = `
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <div>
+        <div class="text-uppercase text-secondary small">Action required</div>
+        <div class="h6 mb-0">${escapeHtml(title)}</div>
+      </div>
+      <span class="badge bg-warning text-dark">Waiting</span>
+    </div>
+    ${description ? `<div class="text-secondary small mb-2">${escapeHtml(description)}</div>` : ''}
+  `;
+
+  const form = document.createElement('form');
+  form.className = 'vstack gap-2';
+  fields.forEach((field) => {
+    if (!field || !field.id) return;
+    const id = field.id;
+    const label = field.label || id;
+    const kind = (field.kind || 'text').toLowerCase();
+    const required = !!field.required;
+    const help = field.help || field.placeholder || '';
+
+    const group = document.createElement('div');
+    group.className = 'input-group-block';
+    const labelEl = document.createElement('label');
+    labelEl.className = 'form-label small text-secondary';
+    labelEl.textContent = `${label}${required ? ' *' : ''}`;
+    labelEl.setAttribute('for', `input-${id}`);
+    group.appendChild(labelEl);
+
+    if (kind === 'consent') {
+      const wrap = document.createElement('div');
+      wrap.className = 'form-check';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'form-check-input';
+      checkbox.id = `input-${id}`;
+      checkbox.name = id;
+      const cbLabel = document.createElement('label');
+      cbLabel.className = 'form-check-label';
+      cbLabel.setAttribute('for', `input-${id}`);
+      cbLabel.textContent = label;
+      wrap.appendChild(checkbox);
+      wrap.appendChild(cbLabel);
+      group.appendChild(wrap);
+    } else if (kind === 'textarea') {
+      const textarea = document.createElement('textarea');
+      textarea.className = 'form-control';
+      textarea.id = `input-${id}`;
+      textarea.name = id;
+      textarea.rows = 3;
+      if (field.placeholder) textarea.placeholder = field.placeholder;
+      group.appendChild(textarea);
+    } else {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'form-control';
+      input.id = `input-${id}`;
+      input.name = id;
+      if (field.placeholder) input.placeholder = field.placeholder;
+      group.appendChild(input);
+    }
+
+    if (help && kind !== 'consent') {
+      const helpEl = document.createElement('div');
+      helpEl.className = 'form-text';
+      helpEl.textContent = help;
+      group.appendChild(helpEl);
+    }
+    form.appendChild(group);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'd-flex gap-2 mt-2';
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'btn btn-primary';
+  submit.textContent = 'Submit';
+  actions.appendChild(submit);
+  form.appendChild(actions);
+
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const values = {};
+    let hasError = false;
+    fields.forEach((field) => {
+      if (!field || !field.id) return;
+      const id = field.id;
+      const kind = (field.kind || 'text').toLowerCase();
+      const required = !!field.required;
+      const el = form.querySelector(`[name="${CSS.escape(id)}"]`);
+      let value = null;
+      if (el) {
+        if (kind === 'consent') value = el.checked;
+        else value = el.value;
+      }
+      if (required && (value === null || value === '' || value === false)) {
+        hasError = true;
+      }
+      values[id] = value;
+    });
+    if (hasError) {
+      alert('Please fill all required fields.');
+      return;
+    }
+    submitInput(event.task_id, values, submit);
+  };
+
+  card.appendChild(form);
+}
+
+function renderApprovalRequest(event) {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const row = tab.statusRows[event.task_id];
+  const card = row && row.inline ? row.inline : tab.elements.approvalCard;
+  if (!card) return;
+  const reason = event.reason || '';
+  card.dataset.taskId = event.task_id || '';
+  card.classList.remove('d-none');
+  card.innerHTML = `
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <div>
+        <div class="text-uppercase text-secondary small">Consent</div>
+        <div class="h6 mb-0">${escapeHtml(event.title || 'Approval required')}</div>
+      </div>
+      <span class="badge bg-warning text-dark">Waiting</span>
+    </div>
+    ${reason ? `<div class="text-secondary small mb-2">${escapeHtml(reason)}</div>` : ''}
+  `;
+  const reasonInput = document.createElement('input');
+  reasonInput.type = 'text';
+  reasonInput.className = 'form-control mb-2';
+  reasonInput.placeholder = 'Optional reason or note';
+
+  const actions = document.createElement('div');
+  actions.className = 'd-flex gap-2';
+  const approveBtn = document.createElement('button');
+  approveBtn.type = 'button';
+  approveBtn.className = 'btn btn-success';
+  approveBtn.textContent = 'Approve';
+  const rejectBtn = document.createElement('button');
+  rejectBtn.type = 'button';
+  rejectBtn.className = 'btn btn-outline-danger';
+  rejectBtn.textContent = 'Reject';
+  actions.appendChild(approveBtn);
+  actions.appendChild(rejectBtn);
+
+  approveBtn.onclick = () => submitApproval(event.task_id, true, reasonInput.value, approveBtn, rejectBtn);
+  rejectBtn.onclick = () => submitApproval(event.task_id, false, reasonInput.value, approveBtn, rejectBtn);
+
+  card.appendChild(reasonInput);
+  card.appendChild(actions);
+}
+
+function clearInputCards(taskId) {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const inputCard = tab.elements.inputCard;
+  if (inputCard && (!taskId || inputCard.dataset.taskId === taskId)) {
+    inputCard.classList.add('d-none');
+    inputCard.innerHTML = '';
+    inputCard.dataset.taskId = '';
+  }
+  const approvalCard = tab.elements.approvalCard;
+  if (approvalCard && (!taskId || approvalCard.dataset.taskId === taskId)) {
+    approvalCard.classList.add('d-none');
+    approvalCard.innerHTML = '';
+    approvalCard.dataset.taskId = '';
+  }
+}
+
+function clearInlinePanel(taskId) {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const row = tab.statusRows[taskId];
+  if (row && row.inline) {
+    row.inline.classList.add('d-none');
+    row.inline.innerHTML = '';
+    row.inline.dataset.taskId = '';
+  }
+}
+
+function submitInput(taskId, values, submitBtn) {
+  const runId = state.currentRunId || state.activeTabId;
+  if (!runId) {
+    alert('No active run selected.');
+    return;
+  }
+  if (submitBtn) submitBtn.disabled = true;
+  fetch(`/api/run/${runId}/input/${taskId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: values }),
+  })
+    .then(res => res.ok ? res.json() : res.text().then(t => { throw new Error(t || 'Submit failed'); }))
+    .then(() => {
+      clearInputCards(taskId);
+      appendLog('status', `Input submitted for ${taskId}`);
+    })
+    .catch(err => {
+      alert('Failed to submit input: ' + (err && err.message ? err.message : String(err)));
+    })
+    .finally(() => {
+      if (submitBtn) submitBtn.disabled = false;
+    });
+}
+
+function submitApproval(taskId, approved, reason, approveBtn, rejectBtn) {
+  const runId = state.currentRunId || state.activeTabId;
+  if (!runId) {
+    alert('No active run selected.');
+    return;
+  }
+  if (approveBtn) approveBtn.disabled = true;
+  if (rejectBtn) rejectBtn.disabled = true;
+  fetch(`/api/run/${runId}/approve/${taskId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved, reason }),
+  })
+    .then(res => res.ok ? res.json() : res.text().then(t => { throw new Error(t || 'Submit failed'); }))
+    .then(() => {
+      clearInputCards(taskId);
+      appendLog('status', `Approval ${approved ? 'granted' : 'rejected'} for ${taskId}`);
+    })
+    .catch(err => {
+      alert('Failed to submit approval: ' + (err && err.message ? err.message : String(err)));
+    })
+    .finally(() => {
+      if (approveBtn) approveBtn.disabled = false;
+      if (rejectBtn) rejectBtn.disabled = false;
+    });
 }
 
 function renderOutputs(results) {

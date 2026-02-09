@@ -96,6 +96,7 @@ class TaskSpec:
     depends_on: List[str] = field(default_factory=list)
     task_type: Optional[str] = None
     reason: Optional[str] = None
+    ui: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "TaskSpec":
@@ -112,6 +113,8 @@ class TaskSpec:
             normalized = task_type.strip().lower()
             if normalized in {"humanapprovaltask", "human_approval", "human-approval", "approval"}:
                 task_type = "human_approval"
+            elif normalized in {"humaninputtask", "human_input", "human-input", "input", "form"}:
+                task_type = "human_input"
         else:
             task_type = None
         return cls(
@@ -124,6 +127,7 @@ class TaskSpec:
             depends_on=depends_on,
             task_type=task_type,
             reason=data.get("reason"),
+            ui=(dict(data.get("ui", {})) if isinstance(data.get("ui"), Mapping) else None),
         )
 
 

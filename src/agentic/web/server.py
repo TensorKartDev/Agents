@@ -31,6 +31,7 @@ AGENTS_DIR = BASE_DIR / "agents"
 AGENT_REGISTRY = AGENTS_DIR / "agents.yaml"
 STATIC_IMG = Path(__file__).parent / "img"
 INDEX_HTML = Path(__file__).parent / "index.html"
+RUNS_DIR = BASE_DIR / ".agentic" / "runs"
 
 if AGENTS_DIR.exists():
     # Mount so icons and assets inside agent folders can be served statically.
@@ -174,6 +175,8 @@ class RunState:
     started_at: float = field(default_factory=time.time)
     stop_requested: bool = False
     requested_path: str = ""
+    pending_input: "PendingInput | None" = None
+    pending_approval: "PendingApproval | None" = None
 
 
 RUNS: Dict[str, RunState] = {}
@@ -182,6 +185,71 @@ RUNS: Dict[str, RunState] = {}
 class RunRequest(BaseModel):
     config_path: str
     engine: str = "autogen"
+
+
+class InputSubmit(BaseModel):
+    fields: Dict[str, Any]
+
+
+class ApprovalSubmit(BaseModel):
+    approved: bool
+    reason: Optional[str] = None
+
+
+@dataclass
+class PendingInput:
+    task_id: str
+    spec: Any
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    response: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class PendingApproval:
+    task_id: str
+    reason: str = ""
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    approved: Optional[bool] = None
+    response_reason: Optional[str] = None
+
+
+def _run_dir(run_id: str) -> Path:
+    return RUNS_DIR / run_id
+
+
+def _artifacts_dir(run_id: str) -> Path:
+    return _run_dir(run_id) / "artifacts"
+
+
+def _manifest_path(run_id: str) -> Path:
+    return _run_dir(run_id) / "manifest.json"
+
+
+def _ensure_run_dirs(run_id: str) -> None:
+    run_dir = _run_dir(run_id)
+    artifacts = _artifacts_dir(run_id)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    manifest_path = _manifest_path(run_id)
+    if not manifest_path.exists():
+        manifest = {
+            "run_id": run_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "inputs": [],
+            "approvals": [],
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+
+def _append_manifest_entry(run_id: str, key: str, entry: Dict[str, Any]) -> None:
+    manifest_path = _manifest_path(run_id)
+    if not manifest_path.exists():
+        _ensure_run_dirs(run_id)
+    data = json.loads(manifest_path.read_text())
+    items = data.get(key)
+    if not isinstance(items, list):
+        data[key] = []
+    data[key].append(entry)
+    manifest_path.write_text(json.dumps(data, indent=2))
 
 
 @app.get("/")
@@ -204,6 +272,7 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
       return {"run_id": existing_id, "project": existing_state.config.name, "already_running": True}
   config = ProjectConfig.from_file(str(config_path))
   run_id = str(uuid.uuid4())
+  _ensure_run_dirs(run_id)
   state = RunState(
       config=config,
       engine=request.engine,
@@ -227,6 +296,81 @@ async def stop_run(run_id: str) -> Dict[str, Any]:
     if state.task and not state.task.done():
         state.task.cancel()
     return {"run_id": run_id, "stopped": True}
+
+
+@app.post("/api/run/{run_id}/input/{task_id}")
+async def submit_input(run_id: str, task_id: str, payload: InputSubmit) -> Dict[str, Any]:
+    state = RUNS.get(run_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    pending = state.pending_input
+    if not pending or pending.task_id != task_id:
+        raise HTTPException(status_code=409, detail="No pending input for this task")
+
+    fields = payload.fields or {}
+    ui = getattr(pending.spec, "ui", None) or {}
+    field_defs = ui.get("fields") if isinstance(ui, dict) else None
+    field_defs = field_defs if isinstance(field_defs, list) else []
+    errors = []
+    for field in field_defs:
+        if not isinstance(field, dict):
+            continue
+        field_id = field.get("id")
+        if not field_id:
+            continue
+        required = bool(field.get("required", False))
+        kind = str(field.get("kind") or "text").lower()
+        value = fields.get(field_id)
+        if required and (value is None or (isinstance(value, str) and not value.strip())):
+            errors.append(f"{field_id} is required")
+            continue
+        if value is None or value == "":
+            continue
+        if kind in {"path", "file", "folder", "dir", "directory"} and field.get("must_exist", True):
+            path = Path(str(value)).expanduser()
+            if not path.exists():
+                errors.append(f"{field_id} path not found")
+    if errors:
+        raise HTTPException(status_code=400, detail="; ".join(errors))
+
+    pending.response = fields
+    _append_manifest_entry(
+        run_id,
+        "inputs",
+        {
+            "task_id": task_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "fields": fields,
+            "ui": ui,
+        },
+    )
+    pending.event.set()
+    return {"run_id": run_id, "task_id": task_id, "received": True}
+
+
+@app.post("/api/run/{run_id}/approve/{task_id}")
+async def submit_approval(run_id: str, task_id: str, payload: ApprovalSubmit) -> Dict[str, Any]:
+    state = RUNS.get(run_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    pending = state.pending_approval
+    if not pending or pending.task_id != task_id:
+        raise HTTPException(status_code=409, detail="No pending approval for this task")
+
+    pending.approved = bool(payload.approved)
+    pending.response_reason = payload.reason
+    _append_manifest_entry(
+        run_id,
+        "approvals",
+        {
+            "task_id": task_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "approved": pending.approved,
+            "reason": payload.reason or pending.reason,
+        },
+    )
+    pending.event.set()
+    return {"run_id": run_id, "task_id": task_id, "approved": pending.approved}
 
 
 async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
@@ -279,9 +423,11 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         if state.stop_requested:
           stopped_early = True
           break
-        if getattr(spec, "task_type", None) == "human_approval":
-          wait_msg = f"WAITING_HUMAN: {getattr(spec, 'reason', '') or ''}".strip()
-          results[spec.id] = {"output": wait_msg, "duration": 0}
+
+        task_type = getattr(spec, "task_type", None)
+        if task_type == "human_input":
+          wait_msg = "WAITING_INPUT"
+          state.pending_input = PendingInput(task_id=spec.id, spec=spec)
           await broadcast(
             {
               "type": "status",
@@ -291,8 +437,92 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
               "duration": 0,
             }
           )
-          stopped_early = True
-          break
+          await broadcast(
+            {
+              "type": "input_request",
+              "task_id": spec.id,
+              "title": getattr(spec, "description", "Input required"),
+              "description": getattr(spec, "description", ""),
+              "ui": getattr(spec, "ui", None),
+            }
+          )
+          await state.pending_input.event.wait()
+          if state.stop_requested:
+            stopped_early = True
+            break
+          payload = state.pending_input.response or {}
+          output = json.dumps(payload)
+          duration = 0
+          results[spec.id] = {"output": output, "duration": duration, "input": payload}
+          state.completed_tasks += 1
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "completed",
+              "output": output,
+              "duration": duration,
+            }
+          )
+          state.pending_input = None
+          continue
+
+        if task_type == "human_approval":
+          reason = getattr(spec, "reason", "") or getattr(spec, "description", "")
+          state.pending_approval = PendingApproval(task_id=spec.id, reason=reason)
+          wait_msg = f"WAITING_HUMAN: {reason}".strip()
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "WAITING_HUMAN",
+              "output": wait_msg,
+              "duration": 0,
+            }
+          )
+          await broadcast(
+            {
+              "type": "approval_request",
+              "task_id": spec.id,
+              "title": "Approval required",
+              "reason": reason,
+            }
+          )
+          await state.pending_approval.event.wait()
+          if state.stop_requested:
+            stopped_early = True
+            break
+          approved = bool(state.pending_approval.approved)
+          output = "Approved" if approved else "Rejected"
+          duration = 0
+          results[spec.id] = {"output": output, "duration": duration, "approved": approved}
+          if approved:
+            state.completed_tasks += 1
+            await broadcast(
+              {
+                "type": "status",
+                "task_id": spec.id,
+                "status": "completed",
+                "output": output,
+                "duration": duration,
+              }
+            )
+          else:
+            await broadcast(
+              {
+                "type": "status",
+                "task_id": spec.id,
+                "status": "failed",
+                "output": output,
+                "duration": duration,
+              }
+            )
+            stopped_early = True
+            state.pending_approval = None
+            break
+          state.pending_approval = None
+          continue
+
         await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})
         t0 = time.perf_counter()
         output = await asyncio.to_thread(run_single, spec)

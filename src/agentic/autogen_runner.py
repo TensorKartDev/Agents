@@ -74,6 +74,19 @@ class AutogenOrchestrator:
                     )
                 )
                 break
+            if task_spec.task_type == "human_input":
+                wait_msg = "WAITING_INPUT"
+                outputs[task_spec.id] = wait_msg
+                self._store.upsert(
+                    TaskStateRecord(
+                        task_id=task_spec.id,
+                        state=TaskState.WAITING_HUMAN,
+                        output=wait_msg,
+                        approved=False,
+                        reason=task_spec.description,
+                    )
+                )
+                break
 
             self._store.upsert(TaskStateRecord(task_id=task_spec.id, state=TaskState.RUNNING))
             try:

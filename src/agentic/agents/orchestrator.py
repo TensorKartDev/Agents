@@ -8,7 +8,7 @@ from pathlib import Path
 from ..config import AgentSpec, ProjectConfig, instantiate_from_path
 from ..llm.provider import LLMProvider
 from ..memory.simple import ConversationBufferMemory
-from ..tasks.base import HumanApprovalTask, Task
+from ..tasks.base import HumanApprovalTask, HumanInputTask, Task
 from ..tasks.runner import TaskRunner
 from ..tools.builtin import register_builtin_tools
 from ..tools.registry import ToolRegistry
@@ -91,6 +91,20 @@ class Orchestrator:
                         expected_output=spec.expected_output,
                         depends_on=spec.depends_on,
                         reason=spec.reason or "",
+                    )
+                )
+                continue
+            if spec.task_type == "human_input":
+                items.append(
+                    HumanInputTask(
+                        id=spec.id,
+                        description=spec.description,
+                        agent_name=spec.agent,
+                        input=spec.input,
+                        context=spec.context,
+                        expected_output=spec.expected_output,
+                        depends_on=spec.depends_on,
+                        ui=spec.ui or {},
                     )
                 )
                 continue

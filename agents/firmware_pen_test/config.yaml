@@ -23,9 +23,34 @@ agents:
 
 # Each task provides structured input that mirrors the workflow diagrams/cheat sheets.
 tasks:
+  - id: project-metadata
+    type: human_input
+    agent: firmware_agent
+    description: Provide project metadata and firmware paths.
+    ui:
+      title: Firmware Intake
+      description: Enter the local filesystem paths for the project doc and firmware image.
+      fields:
+        - id: project_doc
+          label: Project doc path (Word/PDF)
+          kind: path
+          required: true
+        - id: firmware_path
+          label: Firmware image path
+          kind: path
+          required: true
+
+  - id: consent
+    type: human_approval
+    agent: firmware_agent
+    description: Confirm authorization to proceed with firmware analysis.
+    reason: User consent required before running analysis tools.
+    depends_on: [project-metadata]
+
   - id: intake
     agent: firmware_agent
     description: Decide decompression path and OS handling for the provided firmware image.
+    depends_on: [consent]
     input:
       path: /path/to/firmware.bin  # replace with your firmware image path
       extract: true
@@ -34,18 +59,21 @@ tasks:
   - id: format-identification
     agent: firmware_agent
     description: Identify firmware container via magic bytes.
+    depends_on: [consent]
     input:
       path: /path/to/firmware.bin
 
   - id: architecture-deduction
     agent: firmware_agent
     description: Infer architecture/toolchain characteristics.
+    depends_on: [consent]
     input:
       path: /path/to/firmware.bin
 
   - id: section-extraction
     agent: firmware_agent
     description: Summarize carved sections for tooling handoff.
+    depends_on: [consent]
     input:
       path: /path/to/firmware.bin
       extract: false  # set true to carve with binwalk --dd
@@ -53,6 +81,7 @@ tasks:
   - id: static-review
     agent: firmware_agent
     description: Perform configuration/component review.
+    depends_on: [consent]
     input:
       path: /path/to/firmware.bin
       # Override patterns to hunt for specific services if needed.
@@ -61,12 +90,14 @@ tasks:
   - id: secret-harvest
     agent: firmware_agent
     description: Scan for secrets/keys in carved blobs.
+    depends_on: [consent]
     input:
       path: /path/to/firmware.bin
 
   - id: weakness-profile
     agent: firmware_agent
     description: Combine findings into a vulnerability profile.
+    depends_on: [consent]
     input:
       path: /path/to/firmware.bin
       rtos: unknown
@@ -76,6 +107,7 @@ tasks:
   - id: verification-plan
     agent: firmware_agent
     description: Produce verification checklist for exploit/reporting phase.
+    depends_on: [consent]
     input:
       findings:
         - Telnet exposed without auth

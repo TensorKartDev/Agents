@@ -38,6 +38,13 @@ class HumanApprovalTask(Task):
 
 
 @dataclass
+class HumanInputTask(Task):
+    """Task that blocks until a human provides input."""
+
+    ui: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class TaskResult:
     """Result of executing a task."""
 

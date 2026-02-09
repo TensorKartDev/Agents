@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
-from .base import HumanApprovalTask, Task, TaskResult, TaskState
+from .base import HumanApprovalTask, HumanInputTask, Task, TaskResult, TaskState
 
 
 @dataclass
@@ -184,6 +184,8 @@ class TaskRunner:
     def run(self, task: Task) -> TaskResult:
         if isinstance(task, HumanApprovalTask):
             return self._handle_human_task(task)
+        if isinstance(task, HumanInputTask):
+            return self._handle_human_input(task)
         self._store.upsert(TaskStateRecord(task_id=task.id, state=TaskState.RUNNING))
         agent = self._resolver(task.agent_name)
         if not hasattr(agent, "run_task"):
@@ -259,6 +261,40 @@ class TaskRunner:
                 state=TaskState.WAITING_HUMAN,
                 output=result.output,
                 reason=task.reason,
+                approved=False,
+            )
+        )
+        return result
+
+    def _handle_human_input(self, task: HumanInputTask) -> TaskResult:
+        existing = self._store.fetch(task.id)
+        if existing and existing.output and existing.state == TaskState.COMPLETED:
+            result = TaskResult(
+                task=task,
+                success=True,
+                output=existing.output,
+                iterations=0,
+                trace=[],
+                state=TaskState.COMPLETED,
+            )
+            self._results[task.id] = result
+            return result
+
+        result = TaskResult(
+            task=task,
+            success=False,
+            output="WAITING_INPUT",
+            iterations=0,
+            trace=[],
+            state=TaskState.WAITING_HUMAN,
+        )
+        self._results[task.id] = result
+        self._store.upsert(
+            TaskStateRecord(
+                task_id=task.id,
+                state=TaskState.WAITING_HUMAN,
+                output=result.output,
+                reason=task.description,
                 approved=False,
             )
         )
