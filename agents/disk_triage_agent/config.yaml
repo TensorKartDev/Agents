@@ -10,6 +10,7 @@ agents:
   disk_triage_agent:
     description: "Detects disk pressure and highlights large directories."
     tools: [disk_usage_triage]
+    self_deciding: true
 
 tasks:
   - id: disk-path
@@ -37,6 +38,30 @@ tasks:
       top_files: 10
       min_mb: 10
       timeout: 40
+
+  - id: cleanup-recommendations
+    agent: disk_triage_agent
+    description: "Analyze disk usage output and recommend cleanup actions with rationale."
+    depends_on: [disk-usage-triage]
+    input:
+      triage_output: "{{results.disk-usage-triage.output}}"
+      criteria: "Prefer deleting caches, logs, build artifacts; avoid source repos unless explicitly flagged."
+      output_format: |
+        Return JSON only with this shape:
+        {
+          "summary": "...",
+          "proposed_actions": [
+            {"type": "delete", "path": "...", "size_mb": 123.4, "reason": "..."}
+          ],
+          "requires_confirmation": true
+        }
+
+  - id: approve-cleanup
+    type: action_approval
+    agent: disk_triage_agent
+    description: "Approve proposed cleanup actions."
+    depends_on: [cleanup-recommendations]
+    source_task: cleanup-recommendations
 
 tools:
   disk_usage_triage:

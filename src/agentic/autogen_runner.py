@@ -206,22 +206,73 @@ class AutogenOrchestrator:
         return json.dumps(data)
 
     def _build_task_prompt(self, task_spec, agent_spec: AgentSpec) -> str:
+        if agent_spec.self_deciding:
+            behavior = (
+                "You may propose actions, commands, or code as recommendations. "
+                "Clearly label them as proposed and do not claim execution."
+            )
+        else:
+            behavior = "Do not output code or commands. Provide recommendations only."
+        task_input = self._format_task_input(task_spec.input)
         return textwrap.dedent(
             f"""
             Task: {task_spec.description}
-            Task Input: {task_spec.input}
+            Task Input (JSON if available): {task_input}
             Expected tools: {agent_spec.tools}
+            Behavior: {behavior}
             Follow the workflow, calling registered functions by name.
             When completed, respond with 'FINAL: <summary>'.
             """
         ).strip()
 
+    def _format_task_input(self, value: Any) -> str:
+        if isinstance(value, (dict, list)):
+            try:
+                return json.dumps(value, indent=2)
+            except Exception:
+                return str(value)
+        if value is None:
+            return ""
+        return str(value)
+
     def _extract_content(self, result: Any) -> str:
         if isinstance(result, str):
-            return result
+            return self._dedupe_content(result)
         if isinstance(result, dict):
-            return result.get("content", "")
-        return str(result)
+            content = result.get("content", "") or str(result)
+            return self._dedupe_content(content)
+        # Autogen ChatResult objects typically expose chat_history/summary
+        summary = getattr(result, "summary", None)
+        if isinstance(summary, str) and summary.strip():
+            return self._dedupe_content(summary)
+        chat_history = getattr(result, "chat_history", None)
+        if isinstance(chat_history, list) and chat_history:
+            for item in reversed(chat_history):
+                if isinstance(item, dict):
+                    content = item.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return self._dedupe_content(content)
+        content = getattr(result, "content", None)
+        if isinstance(content, str) and content.strip():
+            return self._dedupe_content(content)
+        return self._dedupe_content(str(result))
+
+    @staticmethod
+    def _dedupe_content(content: str) -> str:
+        text = content.strip()
+        if not text:
+            return content
+        # If content is duplicated back-to-back, keep one.
+        half = len(text) // 2
+        if len(text) % 2 == 0 and text[:half] == text[half:]:
+            return text[:half].strip()
+        # If multiple FINAL blocks, keep the first distinct block.
+        if text.count("FINAL:") >= 2:
+            first = text.find("FINAL:")
+            rest = text.find("FINAL:", first + 6)
+            if rest != -1:
+                return text[:rest].strip()
+        return content
 
     def _is_final_message(self, message: Dict[str, Any]) -> bool:
         content = (message or {}).get("content", "") or ""

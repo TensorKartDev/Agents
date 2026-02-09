@@ -34,6 +34,12 @@ body::before {
 .terminal-title { color: #e2e8f0; font-weight: 600; }
 .terminal-meta { color: #64748b; }
 .terminal-log { background: transparent; color: #e2e8f0; font-family: "JetBrains Mono", monospace; padding: 0; margin: 0; min-height: 220px; max-height: 48vh; overflow-y: auto; white-space: pre-wrap; }
+.term-line { display: block; white-space: pre-wrap; }
+.term-muted { color: #cbd5f5; }
+.term-success { color: #22c55e; }
+.term-error { color: #f97316; }
+.term-warn { color: #fbbf24; }
+.term-accent { color: #38bdf8; }
 .progress-bar { transition: width 0.6s ease-in-out; }
 .output-card { border: 1px solid rgba(15,23,42,0.08); border-radius: 12px; padding: 0.85rem; background: rgba(255,255,255,0.9); }
 .output-header { display:flex; justify-content:space-between; align-items:center; gap:0.5rem; }

@@ -75,6 +75,7 @@ class Orchestrator:
             tools=tools,
             planning=planning,
             memory=memory if isinstance(memory, ConversationBufferMemory) else ConversationBufferMemory(),
+            self_deciding=spec.self_deciding,
         )
 
     def _build_tasks(self) -> list[Task]:

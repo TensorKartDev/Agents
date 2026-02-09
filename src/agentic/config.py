@@ -66,6 +66,7 @@ class AgentSpec:
     memory: MemorySpec = field(default_factory=MemorySpec)
     metadata: Dict[str, Any] = field(default_factory=dict)
     llm_params: Dict[str, Any] = field(default_factory=dict)
+    self_deciding: bool = False
 
     @classmethod
     def from_mapping(cls, name: str, data: Mapping[str, Any]) -> "AgentSpec":
@@ -80,6 +81,7 @@ class AgentSpec:
             memory=MemorySpec.from_mapping(data.get("memory")),
             metadata=dict(data.get("metadata", {})),
             llm_params=dict(data.get("llm_params", {})),
+            self_deciding=bool(data.get("self_deciding", False)),
         )
 
 
@@ -98,6 +100,7 @@ class TaskSpec:
     reason: Optional[str] = None
     ui: Optional[Dict[str, Any]] = None
     tool: Optional[str] = None
+    source_task: Optional[str] = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "TaskSpec":
@@ -118,6 +121,8 @@ class TaskSpec:
                 task_type = "human_input"
             elif normalized in {"tool_run", "tool-run", "tool"}:
                 task_type = "tool_run"
+            elif normalized in {"action_approval", "action-approval", "actions_approval", "approve_actions"}:
+                task_type = "action_approval"
         else:
             task_type = None
         return cls(
@@ -132,6 +137,7 @@ class TaskSpec:
             reason=data.get("reason"),
             ui=(dict(data.get("ui", {})) if isinstance(data.get("ui"), Mapping) else None),
             tool=(str(data.get("tool")) if data.get("tool") is not None else None),
+            source_task=(str(data.get("source_task")) if data.get("source_task") is not None else None),
         )
 
 

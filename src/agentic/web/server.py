@@ -255,6 +255,31 @@ def _append_manifest_entry(run_id: str, key: str, entry: Dict[str, Any]) -> None
     manifest_path.write_text(json.dumps(data, indent=2))
 
 
+def _extract_json_payload(text: str) -> Any:
+    if not isinstance(text, str):
+        return text
+    stripped = text.strip()
+    if not stripped:
+        return None
+    # Remove leading FINAL: marker if present
+    if stripped.upper().startswith("FINAL:"):
+        stripped = stripped[6:].strip()
+    # Try direct JSON
+    try:
+        return json.loads(stripped)
+    except Exception:
+        pass
+    # Try to locate first JSON object/array in text
+    for start in ("{", "["):
+        idx = stripped.find(start)
+        if idx != -1:
+            try:
+                return json.loads(stripped[idx:])
+            except Exception:
+                continue
+    return None
+
+
 @app.get("/")
 async def root() -> FileResponse:
     if not INDEX_HTML.exists():
@@ -385,6 +410,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     register_builtin_tools(tool_registry)
     tool_registry.configure_from_specs(config.tool_specs)
     input_store: Dict[str, Dict[str, Any]] = {}
+    result_store: Dict[str, Dict[str, Any]] = {}
 
     async def broadcast(event: Dict[str, Any]) -> None:
         state.history.append(event)
@@ -436,6 +462,11 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
                     token = f"{{{{inputs.{task_id}.{key}}}}}"
                     if token in out:
                         out = out.replace(token, str(val))
+            for task_id, fields in result_store.items():
+                for key, val in fields.items():
+                    token = f"{{{{results.{task_id}.{key}}}}}"
+                    if token in out:
+                        out = out.replace(token, str(val))
             return out
         return value
 
@@ -478,7 +509,8 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           input_store[spec.id] = dict(payload)
           output = json.dumps(payload)
           duration = 0
-          results[spec.id] = {"output": output, "duration": duration, "input": payload}
+          result_store[spec.id] = {"output": output, "duration": duration, "input": payload}
+          results[spec.id] = result_store[spec.id]
           state.completed_tasks += 1
           await broadcast(
             {
@@ -520,7 +552,8 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           approved = bool(state.pending_approval.approved)
           output = "Approved" if approved else "Rejected"
           duration = 0
-          results[spec.id] = {"output": output, "duration": duration, "approved": approved}
+          result_store[spec.id] = {"output": output, "duration": duration, "approved": approved}
+          results[spec.id] = result_store[spec.id]
           if approved:
             state.completed_tasks += 1
             await broadcast(
@@ -546,6 +579,88 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
             state.pending_approval = None
             break
           state.pending_approval = None
+          continue
+
+        if task_type == "action_approval":
+          source_task = getattr(spec, "source_task", None)
+          if not source_task:
+            await broadcast({"type": "error", "message": f"Action approval task {spec.id} missing source_task"})
+            stopped_early = True
+            break
+          source_result = result_store.get(source_task, {})
+          raw_output = source_result.get("output") if isinstance(source_result, dict) else None
+          parsed = _extract_json_payload(raw_output or "")
+          actions = []
+          if isinstance(parsed, dict):
+            actions = parsed.get("proposed_actions") or parsed.get("actions") or []
+          if not isinstance(actions, list):
+            actions = []
+
+          fields = []
+          for idx, action in enumerate(actions):
+            if not isinstance(action, dict):
+              continue
+            path = action.get("path") or action.get("target") or f"action_{idx}"
+            action_type = action.get("type") or "action"
+            size = action.get("size_mb") or action.get("size") or ""
+            reason = action.get("reason") or ""
+            label_parts = [str(action_type), str(path)]
+            if size:
+              label_parts.append(f"({size} MiB)")
+            if reason:
+              label_parts.append(f"- {reason}")
+            fields.append(
+              {
+                "id": f"action_{idx}",
+                "label": " ".join(label_parts),
+                "kind": "consent",
+                "required": False,
+              }
+            )
+
+          state.pending_input = PendingInput(task_id=spec.id, spec=spec)
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "WAITING_HUMAN",
+              "output": "WAITING_ACTION_APPROVAL",
+              "duration": 0,
+            }
+          )
+          await broadcast(
+            {
+              "type": "input_request",
+              "task_id": spec.id,
+              "title": "Approve cleanup actions",
+              "description": "Select the actions you want to approve.",
+              "ui": {"fields": fields},
+            }
+          )
+          await state.pending_input.event.wait()
+          if state.stop_requested:
+            stopped_early = True
+            break
+          payload = state.pending_input.response or {}
+          approvals = []
+          for idx, action in enumerate(actions):
+            if payload.get(f"action_{idx}"):
+              approvals.append(action)
+          output = json.dumps({"approved_actions": approvals}, indent=2)
+          duration = 0
+          result_store[spec.id] = {"output": output, "duration": duration, "approved_actions": approvals}
+          results[spec.id] = result_store[spec.id]
+          state.completed_tasks += 1
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "completed",
+              "output": output,
+              "duration": duration,
+            }
+          )
+          state.pending_input = None
           continue
 
         if task_type == "tool_run":
@@ -583,7 +698,8 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           output = await asyncio.to_thread(run_tool)
           t1 = time.perf_counter()
           duration = t1 - t0
-          results[spec.id] = {"output": output, "duration": duration}
+          result_store[spec.id] = {"output": output, "duration": duration}
+          results[spec.id] = result_store[spec.id]
           state.completed_tasks += 1
           await broadcast(
             {
@@ -603,7 +719,8 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         output = await asyncio.to_thread(run_single, spec)
         t1 = time.perf_counter()
         duration = t1 - t0
-        results[spec.id] = {"output": output, "duration": duration}
+        result_store[spec.id] = {"output": output, "duration": duration}
+        results[spec.id] = result_store[spec.id]
         state.completed_tasks += 1
         await broadcast(
           {

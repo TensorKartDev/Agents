@@ -44,6 +44,7 @@ class Agent:
         tools: Dict[str, Tool],
         planning: PlanningConfig,
         memory: ConversationBufferMemory | None = None,
+        self_deciding: bool = False,
     ) -> None:
         self.name = name
         self.description = description
@@ -51,6 +52,7 @@ class Agent:
         self.tools = tools
         self.planning = planning
         self.memory = memory or ConversationBufferMemory()
+        self.self_deciding = self_deciding
 
     def run_task(self, task: Task) -> TaskResult:
         loop = PlanningLoop(agent=self, task=task)
@@ -101,6 +103,13 @@ class PlanningLoop:
             f"- {name}: {tool.description}" for name, tool in self.agent.tools.items()
         )
         memory_dump = "\n".join(f"{item.role}: {item.content}" for item in self.agent.memory.dump())
+        if self.agent.self_deciding:
+            behavior_note = (
+                "You may propose actions, commands, or code as recommendations. "
+                "Clearly label them as proposed and do not claim execution."
+            )
+        else:
+            behavior_note = "Do not output code or commands. Provide recommendations only."
         scratch = textwrap.dedent(
             f"""
             You are agent {self.agent.name}. Task: {self.task.description}.
@@ -109,6 +118,7 @@ class PlanningLoop:
             Task input: {self.task.input}
             Context: {self.task.context}
             Current memory:\n{memory_dump or 'empty'}
+            Behavior: {behavior_note}
             Iteration: {iteration}
             """
         ).strip()

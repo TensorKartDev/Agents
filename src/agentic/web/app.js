@@ -431,14 +431,10 @@ function handleEvent(event) {
   } else if (event.type === 'status') {
     updateStatus(event);
     appendLog('status', `${event.task_id} -> ${event.status}`);
-    if (event.output && typeof event.output === 'string' && event.output.includes('FINAL:')) {
-      appendLog('final', event.output);
-    }
     if (event.output && event.status === 'completed') {
       appendLog('console', event.output);
     }
   } else if (event.type === 'complete') {
-    renderOutputs(event.results);
     if (event.duration !== undefined) {
       const tab = getTab(state.currentRunId);
       if (tab && tab.elements.runSummary) tab.elements.runSummary.innerText = `Duration: ${Number(event.duration).toFixed(2)}s`;
@@ -446,7 +442,9 @@ function handleEvent(event) {
     appendLog('complete', event.stopped ? 'Run stopped' : 'Run complete — results available');
     markRunFinished();
   } else if (event.type === 'console') {
-    if (event.message) appendLog('console', event.message);
+    if (event.message && !String(event.message).trim().startsWith('FINAL:')) {
+      appendLog('console', event.message);
+    }
   } else if (event.type === 'error') {
     alert(event.message);
     appendLog('error', event.message);
@@ -823,7 +821,25 @@ function appendLog(kind, message) {
     }
   }
   if (!text.endsWith('\n')) text += '\n';
-  state.logEl.textContent += text;
+  const span = document.createElement('span');
+  span.className = pickLogClass(kind, text);
+  span.textContent = text;
+  state.logEl.appendChild(span);
+  // auto-scroll to latest line
+  state.logEl.scrollTop = state.logEl.scrollHeight;
+}
+
+function pickLogClass(kind, text) {
+  const k = (kind || '').toLowerCase();
+  if (k === 'error') return 'term-line term-error';
+  if (k === 'complete') return 'term-line term-success';
+  if (k === 'final') return 'term-line term-accent';
+  if (k === 'status') {
+    if (/failed/i.test(text)) return 'term-line term-error';
+    if (/completed|complete/i.test(text)) return 'term-line term-success';
+    if (/waiting/i.test(text)) return 'term-line term-warn';
+  }
+  return 'term-line term-muted';
 }
 
 function getButtonForConfig(configPath) {
