@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.so
 docs/
+.agentic/
 # Virtual environments
 .venv/
 venv/

@@ -44,30 +44,17 @@ function ensureTab(runId, label) {
   pane.role = 'tabpanel';
   pane.dataset.runId = runId;
   pane.innerHTML = `
-    <div class="row">
-      <div class="col-lg-7 mb-3">
-        <div class="glass-card p-3 h-100">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div>
-              <div class="text-secondary small">Run: ${runId.slice(0, 8)}</div>
-              <small class="text-secondary" data-role="run-summary">Ready</small>
-            </div>
-            <div class="text-end">
-              <small class="text-secondary" data-role="engine-label"></small>
-            </div>
-          </div>
-          <div class="console-log" data-role="log"></div>
-        </div>
-      </div>
-      <div class="col-lg-5 mb-3">
+    <div class="row g-3">
+      <div class="col-12">
         <div class="glass-card p-3 mb-3" data-role="plan-container" style="display:none;">
           <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
             <div>
               <h2 data-role="project-title" class="h5 mb-0 text-info"></h2>
+              <small class="text-secondary" data-role="run-summary">Ready</small>
             </div>
             <div class="text-end">
-              <span class="text-uppercase text-secondary small">Progress</span>
-              <div class="progress progress-with-label" style="width: 220px; height: 10px;">
+              <small class="text-secondary" data-role="engine-label"></small>
+              <div class="progress progress-with-label mt-2" style="width: 220px; height: 10px;">
                 <div data-role="global-progress" class="progress-bar bg-info" style="width: 0%"></div>
                 <span data-role="global-progress-label" class="progress-label">0%</span>
               </div>
@@ -75,13 +62,18 @@ function ensureTab(runId, label) {
           </div>
           <div data-role="tasks-list" class="vstack gap-3"></div>
         </div>
-        <div class="glass-card p-3 mb-3 input-card d-none" data-role="input-card"></div>
-        <div class="glass-card p-3 mb-3 input-card d-none" data-role="approval-card"></div>
-      </div>
-      <div class="col-12 mb-3">
         <div class="glass-card p-3" data-role="outputs" style="display:none;">
           <h3 class="h6 text-info mb-3">Results</h3>
           <div data-role="output-list" class="row gy-3"></div>
+        </div>
+      </div>
+      <div class="col-12">
+        <div class="terminal-card p-3">
+          <div class="terminal-header">
+            <div class="terminal-title">Terminal Output</div>
+            <div class="terminal-meta">Run: ${runId.slice(0, 8)}</div>
+          </div>
+          <pre class="terminal-log" data-role="log"></pre>
         </div>
       </div>
     </div>
@@ -101,8 +93,6 @@ function ensureTab(runId, label) {
     engineLabel: pane.querySelector('[data-role="engine-label"]'),
     projectTitle: pane.querySelector('[data-role="project-title"]'),
     runSummary: pane.querySelector('[data-role="run-summary"]'),
-    inputCard: pane.querySelector('[data-role="input-card"]'),
-    approvalCard: pane.querySelector('[data-role="approval-card"]'),
   };
 
   const tabState = {
@@ -444,6 +434,9 @@ function handleEvent(event) {
     if (event.output && typeof event.output === 'string' && event.output.includes('FINAL:')) {
       appendLog('final', event.output);
     }
+    if (event.output && event.status === 'completed') {
+      appendLog('console', event.output);
+    }
   } else if (event.type === 'complete') {
     renderOutputs(event.results);
     if (event.duration !== undefined) {
@@ -553,7 +546,7 @@ function renderInputRequest(event) {
   const tab = getActiveTab();
   if (!tab) return;
   const row = tab.statusRows[event.task_id];
-  const card = row && row.inline ? row.inline : tab.elements.inputCard;
+  const card = row && row.inline ? row.inline : null;
   if (!card) return;
   const ui = event.ui || {};
   const title = ui.title || event.title || 'Input required';
@@ -679,7 +672,7 @@ function renderApprovalRequest(event) {
   const tab = getActiveTab();
   if (!tab) return;
   const row = tab.statusRows[event.task_id];
-  const card = row && row.inline ? row.inline : tab.elements.approvalCard;
+  const card = row && row.inline ? row.inline : null;
   if (!card) return;
   const reason = event.reason || '';
   card.dataset.taskId = event.task_id || '';
@@ -719,23 +712,6 @@ function renderApprovalRequest(event) {
   card.appendChild(actions);
 }
 
-function clearInputCards(taskId) {
-  const tab = getActiveTab();
-  if (!tab) return;
-  const inputCard = tab.elements.inputCard;
-  if (inputCard && (!taskId || inputCard.dataset.taskId === taskId)) {
-    inputCard.classList.add('d-none');
-    inputCard.innerHTML = '';
-    inputCard.dataset.taskId = '';
-  }
-  const approvalCard = tab.elements.approvalCard;
-  if (approvalCard && (!taskId || approvalCard.dataset.taskId === taskId)) {
-    approvalCard.classList.add('d-none');
-    approvalCard.innerHTML = '';
-    approvalCard.dataset.taskId = '';
-  }
-}
-
 function clearInlinePanel(taskId) {
   const tab = getActiveTab();
   if (!tab) return;
@@ -761,7 +737,7 @@ function submitInput(taskId, values, submitBtn) {
   })
     .then(res => res.ok ? res.json() : res.text().then(t => { throw new Error(t || 'Submit failed'); }))
     .then(() => {
-      clearInputCards(taskId);
+      clearInlinePanel(taskId);
       appendLog('status', `Input submitted for ${taskId}`);
     })
     .catch(err => {
@@ -787,7 +763,7 @@ function submitApproval(taskId, approved, reason, approveBtn, rejectBtn) {
   })
     .then(res => res.ok ? res.json() : res.text().then(t => { throw new Error(t || 'Submit failed'); }))
     .then(() => {
-      clearInputCards(taskId);
+      clearInlinePanel(taskId);
       appendLog('status', `Approval ${approved ? 'granted' : 'rejected'} for ${taskId}`);
     })
     .catch(err => {
@@ -836,49 +812,18 @@ function appendLog(kind, message) {
     if (tab) state.logEl = tab.elements.log;
   }
   if (!state.logEl) return;
-  const ts = new Date().toLocaleTimeString();
-  const entry = document.createElement('div');
-  entry.className = 'log-entry';
-
-  const badge = document.createElement('span');
-  const kindMap = {
-    'PLAN': 'bg-primary',
-    'STATUS': 'bg-info',
-    'FINAL': 'bg-primary',
-    'COMPLETE': 'bg-success',
-    'ERROR': 'bg-danger',
-    'CONSOLE': 'bg-secondary',
-    'DEFAULT': 'bg-info',
-  };
-  const k = (kind || 'info').toUpperCase();
-  const cls = kindMap[k] || kindMap.DEFAULT;
-  badge.className = `badge ${cls} text-white`;
-  badge.textContent = k;
-
-  const meta = document.createElement('div');
-  meta.className = 'log-meta';
-  meta.textContent = ts;
-
-  const content = document.createElement('div');
-  content.className = 'log-content';
-  let sanitized = sanitizeMessage(message);
-  if (sanitized.includes('Tools:')) {
-    sanitized = linkifyTools(sanitized);
-    content.innerHTML = sanitized.replace(/\n/g, '<br/>');
+  let text = '';
+  if (typeof message === 'string') {
+    text = message;
   } else {
-    content.textContent = sanitized;
+    try {
+      text = JSON.stringify(message);
+    } catch (err) {
+      text = String(message);
+    }
   }
-
-  const left = document.createElement('div');
-  left.style.display = 'flex';
-  left.style.flexDirection = 'column';
-  left.style.alignItems = 'flex-start';
-  left.appendChild(badge);
-  left.appendChild(meta);
-
-  entry.appendChild(left);
-  entry.appendChild(content);
-  state.logEl.prepend(entry);
+  if (!text.endsWith('\n')) text += '\n';
+  state.logEl.textContent += text;
 }
 
 function getButtonForConfig(configPath) {

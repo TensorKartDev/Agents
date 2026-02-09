@@ -21,6 +21,9 @@ from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
 from ..tasks.runner import TaskRunner
+from ..tools.builtin import register_builtin_tools
+from ..tools.registry import ToolRegistry
+from ..tools.base import ToolContext
 
 
 app = FastAPI(title="Agentic Web Runner")
@@ -378,6 +381,10 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     state.total_tasks = len(config.tasks)
     state.completed_tasks = 0
     state.stop_requested = False
+    tool_registry = ToolRegistry()
+    register_builtin_tools(tool_registry)
+    tool_registry.configure_from_specs(config.tool_specs)
+    input_store: Dict[str, Dict[str, Any]] = {}
 
     async def broadcast(event: Dict[str, Any]) -> None:
         state.history.append(event)
@@ -415,6 +422,23 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         def run_single(task_spec):
             return orchestrator.run_task(task_spec)
 
+    def resolve_input(value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, dict):
+            return {k: resolve_input(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [resolve_input(v) for v in value]
+        if isinstance(value, str):
+            out = value
+            for task_id, fields in input_store.items():
+                for key, val in fields.items():
+                    token = f"{{{{inputs.{task_id}.{key}}}}}"
+                    if token in out:
+                        out = out.replace(token, str(val))
+            return out
+        return value
+
     for spec in task_specs:
       await broadcast({"type": "status", "task_id": spec.id, "status": "pending"})
 
@@ -451,6 +475,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
             stopped_early = True
             break
           payload = state.pending_input.response or {}
+          input_store[spec.id] = dict(payload)
           output = json.dumps(payload)
           duration = 0
           results[spec.id] = {"output": output, "duration": duration, "input": payload}
@@ -523,8 +548,58 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           state.pending_approval = None
           continue
 
+        if task_type == "tool_run":
+          tool_name = getattr(spec, "tool", None)
+          if not tool_name:
+            await broadcast({"type": "error", "message": f"Tool run task {spec.id} missing tool name"})
+            stopped_early = True
+            break
+          try:
+            tool = tool_registry.get(tool_name)
+          except Exception as exc:
+            await broadcast({"type": "error", "message": f"Tool {tool_name} not found: {exc}"})
+            stopped_early = True
+            break
+          await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})
+          t0 = time.perf_counter()
+          resolved_input = resolve_input(getattr(spec, "input", None))
+          if isinstance(resolved_input, (dict, list)):
+            input_text = json.dumps(resolved_input)
+          elif resolved_input is None:
+            input_text = ""
+          else:
+            input_text = str(resolved_input)
+          def run_tool():
+            result = tool.run(
+              input_text=input_text,
+              context=ToolContext(
+                agent_name=getattr(spec, "agent", "tool"),
+                task_id=spec.id,
+                iteration=0,
+                metadata={"tool": tool_name, "host": "local"},
+              ),
+            )
+            return result.content
+          output = await asyncio.to_thread(run_tool)
+          t1 = time.perf_counter()
+          duration = t1 - t0
+          results[spec.id] = {"output": output, "duration": duration}
+          state.completed_tasks += 1
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "completed",
+              "output": output,
+              "duration": duration,
+            }
+          )
+          continue
+
         await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})
         t0 = time.perf_counter()
+        if getattr(spec, "input", None) is not None:
+          spec.input = resolve_input(spec.input)
         output = await asyncio.to_thread(run_single, spec)
         t1 = time.perf_counter()
         duration = t1 - t0

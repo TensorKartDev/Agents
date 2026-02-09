@@ -97,6 +97,7 @@ class TaskSpec:
     task_type: Optional[str] = None
     reason: Optional[str] = None
     ui: Optional[Dict[str, Any]] = None
+    tool: Optional[str] = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "TaskSpec":
@@ -115,6 +116,8 @@ class TaskSpec:
                 task_type = "human_approval"
             elif normalized in {"humaninputtask", "human_input", "human-input", "input", "form"}:
                 task_type = "human_input"
+            elif normalized in {"tool_run", "tool-run", "tool"}:
+                task_type = "tool_run"
         else:
             task_type = None
         return cls(
@@ -128,6 +131,7 @@ class TaskSpec:
             task_type=task_type,
             reason=data.get("reason"),
             ui=(dict(data.get("ui", {})) if isinstance(data.get("ui"), Mapping) else None),
+            tool=(str(data.get("tool")) if data.get("tool") is not None else None),
         )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -759,6 +760,7 @@ class DiskUsageTriageTool(Tool):
             output_sections.append("Disk usage within acceptable thresholds; no cleanup required.")
 
         min_mb = int(payload.get("min_mb", 100))
+        large_files: List[tuple[int, str]] = []
         find_cmd = [
             "find",
             str(target),
@@ -771,19 +773,44 @@ class DiskUsageTriageTool(Tool):
             "%s %p\n",
         ]
         find_result = _run_command(find_cmd, timeout=int(payload.get("timeout", 40)))
-        output_sections.append(f"Command: {' '.join(find_cmd)}")
-        output_sections.append(_summarize(f"find files > {min_mb}M", find_result))
-
-        large_files: List[tuple[int, str]] = []
-        for line in find_result.get("stdout", "").splitlines():
-            parts = line.split(" ", 1)
-            if len(parts) != 2:
-                continue
+        if find_result.get("code") == 0:
+            output_sections.append(f"Command: {' '.join(find_cmd)}")
+            output_sections.append(_summarize(f"find files > {min_mb}M", find_result))
+            for line in find_result.get("stdout", "").splitlines():
+                parts = line.split(" ", 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    size_bytes = int(parts[0])
+                except ValueError:
+                    continue
+                large_files.append((size_bytes, parts[1]))
+        else:
+            # BSD find (macOS) doesn't support -printf; fall back to Python walk
+            output_sections.append(
+                f"find -printf unavailable; falling back to Python scan for files > {min_mb} MiB."
+            )
             try:
-                size_bytes = int(parts[0])
-            except ValueError:
-                continue
-            large_files.append((size_bytes, parts[1]))
+                root_dev = target.stat().st_dev
+                for root, _, files in os.walk(target):
+                    try:
+                        if Path(root).stat().st_dev != root_dev:
+                            continue
+                    except OSError:
+                        continue
+                    for fname in files:
+                        fpath = Path(root) / fname
+                        try:
+                            stat = fpath.stat()
+                        except OSError:
+                            continue
+                        if stat.st_dev != root_dev:
+                            continue
+                        if stat.st_size >= min_mb * 1024 * 1024:
+                            large_files.append((stat.st_size, str(fpath)))
+            except Exception:
+                large_files = []
+
         large_files.sort(key=lambda item: item[0], reverse=True)
         if large_files:
             top_files = int(payload.get("top_files", 10))
