@@ -1,11 +1,112 @@
-# Agentic Template Starter
+# Agentic Framework
 
-A batteries-included template for building agentic systems that can be copied into new projects. It focuses on:
+An enterprise-grade framework for building, operating, and scaling intelligent agent workflows. Agentic is designed to help teams ship production agents quickly while keeping governance, safety, and extensibility first-class.
 
+**Why teams adopt Agentic**
+- **Config-first orchestration**: model, tools, tasks, and approvals are defined in YAML so you can iterate without code churn.
+- **Enterprise controls**: human-in-the-loop checkpoints, auditable runs, and artifact capture are built in.
+- **Tooling flexibility**: plug in internal systems via a registry rather than rewriting planners.
+- **Multi-engine support**: run the same workflow with different planners and LLM backends.
+- **Real workflows included**: security, sales ops, and edge inference scenarios to accelerate onboarding.
+
+**What it delivers**
 - Config-driven orchestration of agents, tasks, and tools.
-- Simple abstractions for LLM providers and memory backends.
+- Production-ready abstractions for LLM providers and memory backends.
 - Extensible tool registry with reusable implementations.
-- Ready-to-run examples for hardware penetration testing, sales order investigation, and edge/on-board inference.
+- Practical reference workflows for hardware penetration testing, sales order investigation, and edge/on-board inference.
+
+## Build agents with Agentic
+
+Agentic is optimized for agent creators. You define intent and capabilities in YAML, plug in tools, and register your agent so teams can run it safely through the shared UI and CLI.
+
+### 1) Create an agent package
+
+Create a new folder under `agents/` with a manifest and a config:
+
+```
+agents/<your_agent_slug>/
+  agent.yaml
+  config.yaml
+```
+
+### 2) Define the agent manifest
+
+`agent.yaml` describes your agent to the registry and UI:
+
+```yaml
+name: "My Agent"
+description: "What this agent does and who it's for."
+icon: "icon.svg"          # optional
+config_path: "config.yaml"
+inputs:
+  - name: target_path
+    type: string
+outputs:
+  - name: summary
+    type: text
+capabilities:
+  - "triage"
+  - "analysis"
+version: "1.0.0"
+```
+
+### 3) Define the workflow config
+
+`config.yaml` defines tasks, tools, and approvals:
+
+```yaml
+name: "my-agent-workflow"
+description: "Short workflow description"
+agents:
+  my_agent:
+    description: "What the agent does"
+    tools: [my_tool]
+    self_deciding: true
+tasks:
+  - id: intake
+    type: human_input
+    agent: my_agent
+    description: "Collect required inputs"
+    ui:
+      title: "Agent Intake"
+      fields:
+        - id: target_path
+          label: "Target path"
+          kind: path
+          required: true
+  - id: analyze
+    agent: my_agent
+    description: "Analyze the target"
+    depends_on: [intake]
+    input:
+      target_path: "{{inputs.intake.target_path}}"
+tools:
+  my_tool:
+    type: my_package.tools:MyTool
+```
+
+### 4) Register your agent
+
+Add your agent slug to the registry so it appears in the UI:
+
+```
+agents/agents.yaml
+```
+
+```yaml
+agents:
+  - my_agent
+```
+
+### 5) Share it with the group
+
+Once registered, your agent appears in the Admin Web UI and CLI for the entire org. The framework enforces consistent orchestration, approvals, and artifacts while you focus on capability.
+
+## Installation
+
+Installation and environment setup are documented separately:
+
+`FrameworkInstallation.md`
 
 ## Project layout
 
@@ -38,34 +139,6 @@ A batteries-included template for building agentic systems that can be copied in
 └── examples
     └── configs             # YAML configs per domain
 ```
-
-## Quick start
-
-1. **Install dependencies**
-   ```bash
-   python3 -m venv .venv && source .venv/bin/activate  # or favourite virtualenv tool
-   pip install --upgrade pip
-   pip install -e .
-   ```
-
-2. **Run an example scenario**
-   ```bash
-   agentic run examples/configs/hardware_pen_test.yaml
-   ```
-   Replace the config path with `sales_order_investigation.yaml` or `edge_inference.yaml` for the other domains.
-   For the firmware penetration workflow delivered by the security team use:
-   ```bash
-   agentic run examples/configs/firmware_workflow.yaml --show-trace
-   ```
-   Each turn follows the JSON contract shown below so the agent can invoke tools such as `firmware_intake`, `firmware_format_identifier`, and `weakness_profiler` that encode the team’s process. The CLI defaults to the Microsoft Autogen/MAF engine, which drives Ollama-hosted models. Pass `--engine legacy` if you need the original in-house loop.
-
-3. **Swap in your LLM provider**
-   - Implement `LLMProvider` (see `src/agentic/llm/provider.py`).
-   - Reference it in config by module path, or inject programmatically before running tasks.
-
-4. **Add tools**
-   - Subclass `Tool` from `src/agentic/tools/base.py`.
-   - Register with `ToolRegistry` or list it in the YAML config to wire it to an agent.
 
 ## LLM output contract
 
@@ -123,13 +196,13 @@ agents:
 
 The CLI resolves the YAML, registers tools, builds agents, and runs the orchestrator.
 
-## Extending the template
+## Extending the framework
 
 - Create new packages under `src/agentic/tools` or an external repository.
 - Plug in vector memories, graph planners, streaming observers, etc.
-- Deploy via containers by copying this template and customising configs.
+- Deploy via containers and customise configs for your environment.
 
-### Domain-specific starter ideas
+### Domain-specific scenarios
 
 - **Hardware penetration testing** – reuse `nmap_scan` and `firmware_diff` while adding tools that speak to lab equipment or artifact stores.
 - **Sales order investigations** – extend `order_lookup` to query your CRM/ERP and feed structured events into `anomaly_scoring`.
@@ -189,7 +262,7 @@ Run in production with `uvicorn agentic.web.server:app --host 0.0.0.0 --port 800
 - Drop a manifest under `agents/<slug>/agent.yaml` (or `agent.yml`) with `name`, `description`, optional `icon`, and a `config_path` or inline config. Add optional assets/code alongside it.
 - Restart the FastAPI server; the Admin Web UI auto-discovers cards from `/api/agents`, so agent creators never touch UI code.
 - Run the same config via CLI: `agentic run agents/<slug>/agent.yaml --engine autogen` (or `--engine legacy`).
-- See `docs/creating_agents.md` for a short, copy-pasteable template and validation tips.
+- See `docs/creating_agents.md` for a short, copy-pasteable agent manifest and validation tips.
 
 Manifest metadata such as `inputs`, `outputs`, `capabilities`, `version`, `compatibility`, and `pricing` is supported and validated when agents are discovered. Invalid manifests are skipped with user-friendly errors in the server logs.
 
@@ -201,4 +274,4 @@ Use the included `pytest` dependency to verify tools, planners, or integrations:
 pytest
 ```
 
-The sample modules are intentionally lightweight to make it easy to adapt the template to very different agentic workloads. Add your own test suites under `tests/` as needed.
+The modules are intentionally lightweight to make it easy to adapt the framework to very different agentic workloads. Add your own test suites under `tests/` as needed.

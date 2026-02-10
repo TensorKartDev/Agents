@@ -124,7 +124,8 @@ function activateTab(runId) {
 function setTabLabel(runId, label) {
   const tab = getTab(runId);
   if (tab && label) {
-    tab.elements.tabButton.textContent = label;
+    const suffix = runId ? ` • ${runId.slice(0, 8)}` : '';
+    tab.elements.tabButton.textContent = `${label}${suffix}`;
   }
 }
 
@@ -475,7 +476,7 @@ function renderPlan(event) {
   if (globalProgressLabel) globalProgressLabel.textContent = '0%';
   event.tasks.forEach(task => {
     const card = document.createElement('div');
-    card.className = 'p-3 border border-info rounded-4 bg-white bg-opacity-75';
+    card.className = 'p-3 border border-info rounded-4 bg-white bg-opacity-75 task-card';
     card.innerHTML = `
       <div class="d-flex justify-content-between">
         <div>
@@ -496,6 +497,7 @@ function renderPlan(event) {
       label: card.querySelector(`#status-${task.id}`),
       bar: card.querySelector(`#progress-${task.id}`),
       inline: card.querySelector(`[data-task-inline="${task.id}"]`),
+      card,
     };
   });
 }
@@ -506,6 +508,9 @@ function updateStatus(event) {
   const row = tab.statusRows[event.task_id];
   if (!row) return;
   row.label.classList.remove('status-pending', 'status-thinking', 'status-completed', 'status-waiting');
+  if (row.card) {
+    row.card.classList.remove('task-waiting', 'task-completed', 'task-failed');
+  }
   let width = '0%';
   if (event.status === 'pending') {
     row.label.classList.add('status-pending');
@@ -515,9 +520,11 @@ function updateStatus(event) {
     width = '60%';
   } else if (event.status === 'WAITING_HUMAN' || event.status === 'waiting_human') {
     row.label.classList.add('status-waiting');
+    if (row.card) row.card.classList.add('task-waiting');
     width = '60%';
   } else if (event.status === 'completed') {
     row.label.classList.add('status-completed');
+    if (row.card) row.card.classList.add('task-completed');
     width = '100%';
     tab.completedTasks += 1;
     const overall = tab.totalTasks ? Math.round((tab.completedTasks / tab.totalTasks) * 100) : 0;
@@ -530,6 +537,7 @@ function updateStatus(event) {
     }
   } else if (event.status === 'failed') {
     row.label.classList.add('status-failed');
+    if (row.card) row.card.classList.add('task-failed');
     width = '100%';
   }
   row.label.innerText = event.status;
