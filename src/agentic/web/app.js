@@ -73,6 +73,7 @@ function ensureTab(runId, label) {
             <div class="terminal-title">Terminal Output</div>
             <div class="terminal-meta">Run: ${runId.slice(0, 8)}</div>
           </div>
+          <div class="final-summary d-none" data-role="final-summary"></div>
           <pre class="terminal-log" data-role="log"></pre>
         </div>
       </div>
@@ -84,6 +85,7 @@ function ensureTab(runId, label) {
     tabButton: btn,
     pane,
     log: pane.querySelector('[data-role="log"]'),
+    finalSummary: pane.querySelector('[data-role="final-summary"]'),
     planContainer: pane.querySelector('[data-role="plan-container"]'),
     tasksList: pane.querySelector('[data-role="tasks-list"]'),
     outputs: pane.querySelector('[data-role="outputs"]'),
@@ -432,7 +434,7 @@ function handleEvent(event) {
   } else if (event.type === 'status') {
     updateStatus(event);
     appendLog('status', `${event.task_id} -> ${event.status}`);
-    if (event.output && event.status === 'completed') {
+    if (event.output) {
       appendLog('console', event.output);
     }
   } else if (event.type === 'complete') {
@@ -443,8 +445,13 @@ function handleEvent(event) {
     appendLog('complete', event.stopped ? 'Run stopped' : 'Run complete — results available');
     markRunFinished();
   } else if (event.type === 'console') {
-    if (event.message && !String(event.message).trim().startsWith('FINAL:')) {
-      appendLog('console', event.message);
+    if (event.message) {
+      const msg = String(event.message).trim();
+      if (msg.startsWith('FINAL:')) {
+        appendLog('final', msg);
+      } else {
+        appendLog('console', event.message);
+      }
     }
   } else if (event.type === 'error') {
     alert(event.message);
@@ -557,8 +564,9 @@ function renderInputRequest(event) {
   const ui = event.ui || {};
   const title = ui.title || event.title || 'Input required';
   const description = ui.description || event.description || '';
+  const hasUi = !!event.ui;
   let fields = Array.isArray(ui.fields) ? ui.fields.slice() : [];
-  if (!fields.length) {
+  if (!fields.length && !hasUi) {
     fields = [{ id: 'value', label: 'Value', kind: 'text', required: true }];
   }
 
@@ -577,6 +585,12 @@ function renderInputRequest(event) {
 
   const form = document.createElement('form');
   form.className = 'vstack gap-2';
+  if (!fields.length) {
+    const emptyNote = document.createElement('div');
+    emptyNote.className = 'text-secondary small mb-2';
+    emptyNote.textContent = 'No proposed actions found. Submit to continue.';
+    form.appendChild(emptyNote);
+  }
   fields.forEach((field) => {
     if (!field || !field.id) return;
     const id = field.id;
@@ -594,20 +608,40 @@ function renderInputRequest(event) {
     group.appendChild(labelEl);
 
     if (kind === 'consent') {
-      const wrap = document.createElement('div');
-      wrap.className = 'form-check';
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.className = 'form-check-input';
-      checkbox.id = `input-${id}`;
-      checkbox.name = id;
-      const cbLabel = document.createElement('label');
-      cbLabel.className = 'form-check-label';
-      cbLabel.setAttribute('for', `input-${id}`);
-      cbLabel.textContent = label;
-      wrap.appendChild(checkbox);
-      wrap.appendChild(cbLabel);
-      group.appendChild(wrap);
+      const labelEl = document.createElement('div');
+      labelEl.className = 'small text-secondary mb-1';
+      labelEl.textContent = label;
+      const hidden = document.createElement('input');
+      hidden.type = 'hidden';
+      hidden.name = id;
+      hidden.id = `input-${id}`;
+      hidden.value = '';
+      const btnWrap = document.createElement('div');
+      btnWrap.className = 'btn-group btn-group-sm w-100';
+      btnWrap.setAttribute('role', 'group');
+      const yesBtn = document.createElement('button');
+      yesBtn.type = 'button';
+      yesBtn.className = 'btn btn-outline-success';
+      yesBtn.textContent = 'Yes';
+      const noBtn = document.createElement('button');
+      noBtn.type = 'button';
+      noBtn.className = 'btn btn-outline-danger';
+      noBtn.textContent = 'No';
+      yesBtn.onclick = () => {
+        hidden.value = 'true';
+        yesBtn.classList.add('active');
+        noBtn.classList.remove('active');
+      };
+      noBtn.onclick = () => {
+        hidden.value = 'false';
+        noBtn.classList.add('active');
+        yesBtn.classList.remove('active');
+      };
+      btnWrap.appendChild(yesBtn);
+      btnWrap.appendChild(noBtn);
+      group.appendChild(labelEl);
+      group.appendChild(btnWrap);
+      group.appendChild(hidden);
     } else if (kind === 'textarea') {
       const textarea = document.createElement('textarea');
       textarea.className = 'form-control';
@@ -656,7 +690,7 @@ function renderInputRequest(event) {
       const el = form.querySelector(`[name="${CSS.escape(id)}"]`);
       let value = null;
       if (el) {
-        if (kind === 'consent') value = el.checked;
+        if (kind === 'consent') value = el.value === 'true';
         else value = el.value;
       }
       if (required && (value === null || value === '' || value === false)) {
@@ -693,28 +727,22 @@ function renderApprovalRequest(event) {
     </div>
     ${reason ? `<div class="text-secondary small mb-2">${escapeHtml(reason)}</div>` : ''}
   `;
-  const reasonInput = document.createElement('input');
-  reasonInput.type = 'text';
-  reasonInput.className = 'form-control mb-2';
-  reasonInput.placeholder = 'Optional reason or note';
-
   const actions = document.createElement('div');
   actions.className = 'd-flex gap-2';
   const approveBtn = document.createElement('button');
   approveBtn.type = 'button';
   approveBtn.className = 'btn btn-success';
-  approveBtn.textContent = 'Approve';
+  approveBtn.textContent = 'Yes';
   const rejectBtn = document.createElement('button');
   rejectBtn.type = 'button';
   rejectBtn.className = 'btn btn-outline-danger';
-  rejectBtn.textContent = 'Reject';
+  rejectBtn.textContent = 'No';
   actions.appendChild(approveBtn);
   actions.appendChild(rejectBtn);
 
-  approveBtn.onclick = () => submitApproval(event.task_id, true, reasonInput.value, approveBtn, rejectBtn);
-  rejectBtn.onclick = () => submitApproval(event.task_id, false, reasonInput.value, approveBtn, rejectBtn);
+  approveBtn.onclick = () => submitApproval(event.task_id, true, '', approveBtn, rejectBtn);
+  rejectBtn.onclick = () => submitApproval(event.task_id, false, '', approveBtn, rejectBtn);
 
-  card.appendChild(reasonInput);
   card.appendChild(actions);
 }
 
@@ -835,6 +863,19 @@ function appendLog(kind, message) {
   state.logEl.appendChild(span);
   // auto-scroll to latest line
   state.logEl.scrollTop = state.logEl.scrollHeight;
+  if (kind === 'final') {
+    setFinalSummary(text);
+  }
+}
+
+function setFinalSummary(text) {
+  const tab = getTab(state.currentRunId) || getTab(state.activeTabId);
+  if (!tab || !tab.elements.finalSummary) return;
+  const el = tab.elements.finalSummary;
+  const clean = String(text || '').replace(/^FINAL:\s*/i, '').trim();
+  if (!clean) return;
+  el.innerText = `FINAL: ${clean}`;
+  el.classList.remove('d-none');
 }
 
 function pickLogClass(kind, text) {
@@ -846,6 +887,7 @@ function pickLogClass(kind, text) {
     if (/failed/i.test(text)) return 'term-line term-error';
     if (/completed|complete/i.test(text)) return 'term-line term-success';
     if (/waiting/i.test(text)) return 'term-line term-warn';
+    if (/thinking/i.test(text)) return 'term-line term-thinking';
   }
   return 'term-line term-muted';
 }

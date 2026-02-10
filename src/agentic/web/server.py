@@ -6,12 +6,17 @@ import asyncio
 import json
 import time
 import uuid
+import re
+import subprocess
+import io
+import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -20,6 +25,61 @@ from ..agents.manifest import normalize_manifest, validate_manifest
 from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
+
+
+def _load_structured(text: Any) -> Any:
+    if isinstance(text, (dict, list)):
+        return text
+    if not isinstance(text, str):
+        return text
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            return yaml.safe_load(text)
+        except yaml.YAMLError:
+            return text
+
+
+def _run_command(args: List[str], *, timeout: int = 120) -> Dict[str, Any]:
+    t0 = time.perf_counter()
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        t1 = time.perf_counter()
+        return {
+            "code": proc.returncode,
+            "stdout": proc.stdout.strip(),
+            "stderr": proc.stderr.strip(),
+            "duration": t1 - t0,
+        }
+    except FileNotFoundError:
+        t1 = time.perf_counter()
+        return {"code": 127, "stdout": "", "stderr": f"{args[0]} not found", "duration": t1 - t0}
+    except subprocess.TimeoutExpired:
+        t1 = time.perf_counter()
+        return {"code": -1, "stdout": "", "stderr": f"timeout after {timeout}s", "duration": t1 - t0}
+    except Exception as exc:
+        t1 = time.perf_counter()
+        return {"code": 1, "stdout": "", "stderr": f"failed to run {' '.join(args)}: {exc}", "duration": t1 - t0}
+
+
+def _summarize(label: str, result: Dict[str, Any], *, limit: int = 1200) -> str:
+    output = (result.get("stdout") or result.get("stderr") or "").strip()
+    if not output:
+        output = "<no output>"
+    if len(output) > limit:
+        output = output[:limit] + "\n...[truncated]..."
+    status = "ok" if result.get("code") == 0 else f"exit {result.get('code')}"
+    duration = result.get("duration")
+    timing = f" in {duration:.2f}s" if isinstance(duration, (int, float)) else ""
+    return f"{label} ({status}{timing}):\n{output}"
+
+
+def _run_with_capture(fn, *args, **kwargs):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        result = fn(*args, **kwargs)
+    return result, buf.getvalue()
 from ..tasks.runner import TaskRunner
 from ..tools.builtin import register_builtin_tools
 from ..tools.registry import ToolRegistry
@@ -595,6 +655,22 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
             actions = parsed.get("proposed_actions") or parsed.get("actions") or []
           if not isinstance(actions, list):
             actions = []
+          if not actions and isinstance(raw_output, str):
+            text = raw_output
+            if "FINAL:" in text:
+              text = text.split("FINAL:", 1)[1]
+            pattern = r"(Delete|Remove|Compress)\\s+`?([^`\\n]+?)`?\\s*\\((\\d+(?:\\.\\d+)?)\\s*(MiB|MB)\\)"
+            matches = re.findall(pattern, text, flags=re.IGNORECASE)
+            for action_type, path, size, unit in matches:
+              size_mb = float(size)
+              actions.append(
+                {
+                  "type": action_type.lower(),
+                  "path": path.strip(),
+                  "size_mb": size_mb,
+                  "reason": "Parsed from recommendations text",
+                }
+              )
 
           fields = []
           for idx, action in enumerate(actions):
@@ -684,18 +760,126 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
             input_text = ""
           else:
             input_text = str(resolved_input)
-          def run_tool():
-            result = tool.run(
-              input_text=input_text,
-              context=ToolContext(
-                agent_name=getattr(spec, "agent", "tool"),
-                task_id=spec.id,
-                iteration=0,
-                metadata={"tool": tool_name, "host": "local"},
-              ),
-            )
-            return result.content
-          output = await asyncio.to_thread(run_tool)
+
+          if tool_name == "disk_usage_triage":
+            payload = _load_structured(input_text) or {}
+            if not isinstance(payload, dict):
+              payload = {}
+            path_value = payload.get("path") or "/"
+            timeout = int(payload.get("timeout", 40))
+            min_mb = int(payload.get("min_mb", 100))
+            top_n = int(payload.get("top_n", 5))
+            top_files = int(payload.get("top_files", 10))
+
+            output_sections: List[str] = []
+            df_cmd = ["df", "-P", "-k", str(path_value)]
+            await broadcast({"type": "console", "message": f"Running: {' '.join(df_cmd)}"})
+            df_result = await asyncio.to_thread(_run_command, df_cmd, timeout=timeout)
+            output_sections.append(_summarize("df -P -k", df_result))
+            await broadcast({"type": "console", "message": _summarize("df -P -k", df_result, limit=400)})
+
+            percent_used: Optional[int] = None
+            stdout_lines = df_result.get("stdout", "").splitlines()
+            if len(stdout_lines) >= 2:
+              for line in stdout_lines[1:]:
+                columns = [col for col in line.split() if col]
+                percent_column = next((col for col in columns if col.endswith("%")), None)
+                if percent_column:
+                  try:
+                    percent_used = int(percent_column.strip("%"))
+                  except ValueError:
+                    percent_used = None
+                if percent_used is not None:
+                  break
+
+            status = "unknown"
+            if percent_used is not None:
+              if percent_used >= 85:
+                status = "critical"
+              elif percent_used >= 70:
+                status = "warning"
+              else:
+                status = "ok"
+
+            if status in {"warning", "critical"}:
+              du_cmd = ["du", "-x", "-k", "-d", "1", str(path_value)]
+              await broadcast({"type": "console", "message": f"Running: {' '.join(du_cmd)}"})
+              du_result = await asyncio.to_thread(_run_command, du_cmd, timeout=timeout)
+              output_sections.append(_summarize("du -x -k -d 1", du_result))
+              await broadcast({"type": "console", "message": _summarize("du -x -k -d 1", du_result, limit=400)})
+              largest: List[tuple[int, str]] = []
+              for line in du_result.get("stdout", "").splitlines():
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                  continue
+                try:
+                  size_kb = int(parts[0])
+                except ValueError:
+                  continue
+                path = parts[1]
+                if path == str(path_value):
+                  continue
+                largest.append((size_kb, path))
+              largest.sort(key=lambda item: item[0], reverse=True)
+              if largest:
+                report_lines = []
+                for size_kb, path in largest[:top_n]:
+                  size_mb = size_kb / 1024
+                  report_lines.append(f"- {path}: {size_mb:.1f} MiB")
+                output_sections.append("Top directories by size:\n" + "\n".join(report_lines))
+            else:
+              output_sections.append("Disk usage within acceptable thresholds; no cleanup required.")
+
+            find_cmd = [
+              "find",
+              str(path_value),
+              "-xdev",
+              "-type",
+              "f",
+              "-size",
+              f"+{min_mb}M",
+              "-printf",
+              "%s %p\\n",
+            ]
+            await broadcast({"type": "console", "message": f"Running: {' '.join(find_cmd)}"})
+            find_result = await asyncio.to_thread(_run_command, find_cmd, timeout=timeout)
+            output_sections.append(_summarize(f"find files > {min_mb}M", find_result))
+            await broadcast({"type": "console", "message": _summarize(f"find files > {min_mb}M", find_result, limit=400)})
+
+            large_files: List[tuple[int, str]] = []
+            for line in find_result.get("stdout", "").splitlines():
+              parts = line.split(" ", 1)
+              if len(parts) != 2:
+                continue
+              try:
+                size_bytes = int(parts[0])
+              except ValueError:
+                continue
+              large_files.append((size_bytes, parts[1]))
+            large_files.sort(key=lambda item: item[0], reverse=True)
+            if large_files:
+              lines = []
+              for size_bytes, path in large_files[:top_files]:
+                size_mb = size_bytes / (1024 * 1024)
+                lines.append(f"- {path}: {size_mb:.1f} MiB")
+              output_sections.append(f"Largest files (> {min_mb} MiB):\n" + "\n".join(lines))
+            else:
+              output_sections.append(f"No files larger than {min_mb} MiB found under {path_value}.")
+
+            output = "\n\n".join(output_sections)
+          else:
+            def run_tool():
+              result = tool.run(
+                input_text=input_text,
+                context=ToolContext(
+                  agent_name=getattr(spec, "agent", "tool"),
+                  task_id=spec.id,
+                  iteration=0,
+                  metadata={"tool": tool_name, "host": "local"},
+                ),
+              )
+              return result.content
+            output = await asyncio.to_thread(run_tool)
           t1 = time.perf_counter()
           duration = t1 - t0
           result_store[spec.id] = {"output": output, "duration": duration}
@@ -716,7 +900,9 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         t0 = time.perf_counter()
         if getattr(spec, "input", None) is not None:
           spec.input = resolve_input(spec.input)
-        output = await asyncio.to_thread(run_single, spec)
+        output, captured = await asyncio.to_thread(_run_with_capture, run_single, spec)
+        if captured:
+          await broadcast({"type": "console", "message": captured})
         t1 = time.perf_counter()
         duration = t1 - t0
         result_store[spec.id] = {"output": output, "duration": duration}
@@ -762,6 +948,7 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     queue: asyncio.Queue = asyncio.Queue()
     state.subscribers.append(queue)
     await websocket.accept()
+    closed = False
     try:
         for event in state.history:
             await websocket.send_text(json.dumps(event))
@@ -772,11 +959,15 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
             if event.get("type") == "complete":
                 completed = True
     except WebSocketDisconnect:
-        pass
+        closed = True
     finally:
         if queue in state.subscribers:
             state.subscribers.remove(queue)
-        await websocket.close()
+        if not closed and websocket.client_state != WebSocketState.DISCONNECTED:
+            try:
+                await websocket.close()
+            except RuntimeError:
+                pass
 
 
 @app.get("/api/runs")

@@ -25,7 +25,20 @@ body::before {
 .neon { color: #0f172a; letter-spacing: 0.08rem; text-transform: uppercase; }
 .status-text { font-weight: 700; text-transform: uppercase; }
 .status-pending { color: #f97316; }
-.status-thinking { color: #0ea5e9; animation: pulse 1.5s infinite; }
+.status-thinking { color: #0ea5e9; animation: pulse 1.5s infinite; position: relative; }
+.status-thinking::after {
+  content: "…";
+  display: inline-block;
+  margin-left: 0.15rem;
+  animation: thinking-dots 1s steps(4, end) infinite;
+}
+@keyframes thinking-dots {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75% { content: "..."; }
+  100% { content: "…"; }
+}
 .status-completed { color: #10b981; }
 .status-waiting { color: #eab308; }
 .status-failed { color: #ef4444; }
@@ -44,6 +57,20 @@ body::before {
 .term-error { color: #f97316; }
 .term-warn { color: #fbbf24; }
 .term-accent { color: #38bdf8; }
+.term-thinking { color: #7dd3fc; position: relative; }
+.term-thinking::after {
+  content: "";
+  display: inline-block;
+  margin-left: 0.2rem;
+  animation: term-thinking-dots 1s steps(4, end) infinite;
+}
+@keyframes term-thinking-dots {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75% { content: "..."; }
+  100% { content: "…"; }
+}
 .progress-bar { transition: width 0.6s ease-in-out; }
 .output-card { border: 1px solid rgba(15,23,42,0.08); border-radius: 12px; padding: 0.85rem; background: rgba(255,255,255,0.9); }
 .output-header { display:flex; justify-content:space-between; align-items:center; gap:0.5rem; }
@@ -77,6 +104,18 @@ body::before {
 .run-progress-wrap { display:flex; align-items:center; gap:0.5rem; min-width: 140px; }
 .progress-with-label { position: relative; }
 .progress-label { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:0.65rem; font-weight:600; color:#0f172a; pointer-events:none; text-shadow:0 1px 2px rgba(255,255,255,0.7); }
+
+.final-summary {
+  margin: 0.5rem 0 0.75rem 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  background: rgba(2, 132, 199, 0.08);
+  border: 1px solid rgba(2, 132, 199, 0.25);
+  color: #0f172a;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
 .input-card,
 .task-inline-panel { border: 1px dashed rgba(15,23,42,0.2); background: rgba(255,255,255,0.95); padding: 0.75rem; border-radius: 12px; }
 .input-group-block .form-label { margin-bottom: 0.25rem; }
