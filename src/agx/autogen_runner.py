@@ -119,7 +119,24 @@ class AutogenOrchestrator:
             message=prompt,
             max_turns=max(4, agent_spec.planning.max_iterations * 2),
         )
-        return self._extract_content(result)
+        content = self._extract_content(result)
+        if self._needs_json_output(task_spec):
+            parsed = self._extract_json_from_text(content)
+            if parsed is None:
+                retry_prompt = prompt + "\n\nSTRICT_MODE: Return JSON only. No code, no markdown, no extra text."
+                retry_result = user.initiate_chat(
+                    assistant,
+                    message=retry_prompt,
+                    max_turns=max(2, agent_spec.planning.max_iterations),
+                )
+                content = self._extract_content(retry_result)
+                parsed = self._extract_json_from_text(content)
+            if parsed is not None:
+                try:
+                    return json.dumps(parsed, indent=2)
+                except Exception:
+                    return json.dumps(parsed)
+        return content
 
     def _build_assistant(self, agent_spec: AgentSpec, task_id: str) -> AssistantAgent:
         llm_params = self._resolve_llm_params(agent_spec)
@@ -213,6 +230,11 @@ class AutogenOrchestrator:
             )
         else:
             behavior = "Do not output code or commands. Provide recommendations only."
+        if self._needs_json_output(task_spec):
+            behavior = (
+                "Return JSON only. Do not include code, markdown, or explanatory text. "
+                "If no actions are needed, return an empty proposed_actions array."
+            )
         task_input = self._format_task_input(task_spec.input)
         return textwrap.dedent(
             f"""
@@ -276,4 +298,43 @@ class AutogenOrchestrator:
 
     def _is_final_message(self, message: Dict[str, Any]) -> bool:
         content = (message or {}).get("content", "") or ""
-        return content.strip().upper().startswith("FINAL:")
+        stripped = content.strip()
+        if stripped.upper().startswith("FINAL:"):
+            return True
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                json.loads(stripped)
+                return True
+            except Exception:
+                return False
+        return False
+
+    def _needs_json_output(self, task_spec) -> bool:
+        if isinstance(getattr(task_spec, "input", None), dict):
+            if "output_format" in task_spec.input:
+                return True
+            if task_spec.input.get("json_only") is True:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_json_from_text(text: str) -> Any:
+        if not isinstance(text, str):
+            return None
+        stripped = text.strip()
+        if not stripped:
+            return None
+        if stripped.upper().startswith("FINAL:"):
+            stripped = stripped[6:].strip()
+        try:
+            return json.loads(stripped)
+        except Exception:
+            pass
+        for start in ("{", "["):
+            idx = stripped.find(start)
+            if idx != -1:
+                try:
+                    return json.loads(stripped[idx:])
+                except Exception:
+                    continue
+        return None

@@ -922,15 +922,40 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
             await broadcast({"type": "console", "message": _summarize(f"find files > {min_mb}M", find_result, limit=400)})
 
             large_files: List[tuple[int, str]] = []
-            for line in find_result.get("stdout", "").splitlines():
-              parts = line.split(" ", 1)
-              if len(parts) != 2:
-                continue
+            if find_result.get("code") == 0:
+              for line in find_result.get("stdout", "").splitlines():
+                parts = line.split(" ", 1)
+                if len(parts) != 2:
+                  continue
+                try:
+                  size_bytes = int(parts[0])
+                except ValueError:
+                  continue
+                large_files.append((size_bytes, parts[1]))
+            else:
+              output_sections.append(
+                f"find -printf unavailable; falling back to Python scan for files > {min_mb} MiB."
+              )
               try:
-                size_bytes = int(parts[0])
-              except ValueError:
-                continue
-              large_files.append((size_bytes, parts[1]))
+                root_dev = Path(path_value).stat().st_dev
+                for root, _, files in os.walk(path_value):
+                  try:
+                    if Path(root).stat().st_dev != root_dev:
+                      continue
+                  except OSError:
+                    continue
+                  for fname in files:
+                    fpath = Path(root) / fname
+                    try:
+                      stat = fpath.stat()
+                    except OSError:
+                      continue
+                    if stat.st_dev != root_dev:
+                      continue
+                    if stat.st_size >= min_mb * 1024 * 1024:
+                      large_files.append((stat.st_size, str(fpath)))
+              except Exception:
+                large_files = []
             large_files.sort(key=lambda item: item[0], reverse=True)
             if large_files:
               lines = []
@@ -977,7 +1002,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         if getattr(spec, "input", None) is not None:
           spec.input = resolve_input(spec.input)
         output, captured = await asyncio.to_thread(_run_with_capture, run_single, spec)
-        if captured:
+        if captured and engine != "autogen":
           await broadcast({"type": "console", "message": captured})
         t1 = time.perf_counter()
         duration = t1 - t0
