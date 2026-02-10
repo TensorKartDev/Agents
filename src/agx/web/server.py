@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 import re
@@ -26,6 +27,7 @@ from .. import __version__ as agx_version
 from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
+from ..persistence import PostgresRunStore
 
 
 def _load_structured(text: Any) -> Any:
@@ -104,6 +106,35 @@ if AGENTS_DIR.exists():
 # Mount default static images (e.g., robot.svg) if present
 if STATIC_IMG.exists():
     app.mount("/static/img", StaticFiles(directory=STATIC_IMG), name="static-img")
+
+
+@app.on_event("startup")
+async def init_run_store() -> None:
+    global RUN_STORE
+    db_url = os.getenv("AGX_DB_URL", "").strip()
+    if not db_url:
+        return
+    RUN_STORE = PostgresRunStore(db_url)
+    for record in RUN_STORE.list_runs():
+        try:
+            config = ProjectConfig.from_file(record.config_path)
+        except Exception:
+            continue
+        state = RunState(
+            config=config,
+            engine=record.engine,
+            config_path=record.config_path,
+            requested_path=record.requested_path,
+            total_tasks=record.total_tasks,
+            completed_tasks=record.completed_tasks,
+        )
+        state.completed = record.completed
+        state.stop_requested = record.stop_requested
+        state.started_at = record.started_at
+        events = RUN_STORE.list_events(record.run_id)
+        state.history = list(events)
+        state.event_seq = len(events)
+        RUNS[record.run_id] = state
 
 
 @dataclass
@@ -246,9 +277,11 @@ class RunState:
     requested_path: str = ""
     pending_input: "PendingInput | None" = None
     pending_approval: "PendingApproval | None" = None
+    event_seq: int = 0
 
 
 RUNS: Dict[str, RunState] = {}
+RUN_STORE: PostgresRunStore | None = None
 
 
 class RunRequest(BaseModel):
@@ -376,6 +409,19 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
       completed_tasks=0,
   )
   RUNS[run_id] = state
+  if RUN_STORE is not None:
+    RUN_STORE.create_run(
+        run_id=run_id,
+        project=config.name,
+        engine=request.engine,
+        config_path=resolved_path,
+        requested_path=request.config_path,
+        total_tasks=len(config.tasks),
+        completed_tasks=0,
+        completed=False,
+        stop_requested=False,
+        started_at=state.started_at,
+    )
   state.task = asyncio.create_task(execute_run(run_id, config, request.engine))
   return {"run_id": run_id, "project": config.name}
 
@@ -389,6 +435,13 @@ async def stop_run(run_id: str) -> Dict[str, Any]:
     state.completed = True
     if state.task and not state.task.done():
         state.task.cancel()
+    if RUN_STORE is not None:
+        RUN_STORE.update_run(
+            run_id=run_id,
+            completed_tasks=state.completed_tasks,
+            completed=True,
+            stop_requested=True,
+        )
     return {"run_id": run_id, "stopped": True}
 
 
@@ -480,8 +533,21 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
 
     async def broadcast(event: Dict[str, Any]) -> None:
         state.history.append(event)
+        state.event_seq += 1
+        if RUN_STORE is not None:
+            RUN_STORE.append_event(run_id, state.event_seq, event)
         for queue in list(state.subscribers):
             await queue.put(event)
+
+    def persist_run() -> None:
+        if RUN_STORE is None:
+            return
+        RUN_STORE.update_run(
+            run_id=run_id,
+            completed_tasks=state.completed_tasks,
+            completed=state.completed,
+            stop_requested=state.stop_requested,
+        )
 
     await broadcast(
         {
@@ -578,6 +644,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           result_store[spec.id] = {"output": output, "duration": duration, "input": payload}
           results[spec.id] = result_store[spec.id]
           state.completed_tasks += 1
+          persist_run()
           await broadcast(
             {
               "type": "status",
@@ -622,6 +689,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           results[spec.id] = result_store[spec.id]
           if approved:
             state.completed_tasks += 1
+            persist_run()
             await broadcast(
               {
                 "type": "status",
@@ -733,6 +801,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           result_store[spec.id] = {"output": output, "duration": duration, "approved_actions": approvals}
           results[spec.id] = result_store[spec.id]
           state.completed_tasks += 1
+          persist_run()
           await broadcast(
             {
               "type": "status",
@@ -891,6 +960,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           result_store[spec.id] = {"output": output, "duration": duration}
           results[spec.id] = result_store[spec.id]
           state.completed_tasks += 1
+          persist_run()
           await broadcast(
             {
               "type": "status",
@@ -914,6 +984,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         result_store[spec.id] = {"output": output, "duration": duration}
         results[spec.id] = result_store[spec.id]
         state.completed_tasks += 1
+        persist_run()
         await broadcast(
           {
             "type": "status",
@@ -943,6 +1014,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
 
     await broadcast({"type": "complete", "results": results, "duration": overall, "stopped": stopped_early or state.stop_requested})
     state.completed = True
+    persist_run()
 
 
 @app.websocket("/ws/{run_id}")

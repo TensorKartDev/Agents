@@ -3,7 +3,7 @@ name = "agx-framework"
 dynamic = ["version"]
 description = "Enterprise-grade agent workflow framework"
 readme = "README.md"
-authors = [{ name = "Agentic Starter" }]
+authors = [{ name = "Ashish Madkaikar", email = "ashish.madkaikar@emerson.com" }]
 requires-python = ">=3.10"
 dependencies = [
     "typer>=0.12",
@@ -14,6 +14,7 @@ dependencies = [
     "fix-busted-json>=0.0.18",
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.23.0",
+    "psycopg>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +27,7 @@ requires = ["setuptools>=65", "wheel", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
-version_scheme = "no-guess-dev"
+version_scheme = "post-release"
 local_scheme = "no-local-version"
 
 [project.scripts]

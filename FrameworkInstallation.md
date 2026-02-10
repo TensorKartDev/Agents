@@ -25,6 +25,14 @@ agx run examples/configs/firmware_workflow.yaml --show-trace
 
 Each turn follows the JSON contract shown below so the agent can invoke tools such as `firmware_intake`, `firmware_format_identifier`, and `weakness_profiler` that encode the team’s process. The CLI defaults to the Microsoft Autogen/MAF engine, which drives Ollama-hosted models. Pass `--engine legacy` if you need the original in-house loop.
 
+## Configure Postgres run store
+
+Set the database URL to persist runs and audit events:
+
+```bash
+export AGX_DB_URL="postgresql+psycopg://admin:@localhost:5432/agx"
+```
+
 ## Swap in your LLM provider
 
 - Implement `LLMProvider` (see `src/agx/llm/provider.py`).
