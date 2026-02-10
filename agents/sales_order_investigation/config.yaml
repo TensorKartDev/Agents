@@ -1,7 +1,7 @@
 name: sales-order-investigator
 description: Investigate suspicious enterprise sales orders.
 defaults:
-  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_provider: agx.llm.provider:OllamaProvider
   llm_params:
     model: gpt-oss
     host: http://localhost:11434
@@ -30,7 +30,7 @@ tasks:
 
 tools:
   order_lookup:
-    type: agentic.tools.builtin:OrderLookupTool
+    type: agx.tools.builtin:OrderLookupTool
     args:
       orders:
         - id: "84593"
@@ -39,4 +39,4 @@ tools:
           status: "pending manual review"
           notes: "Urgent shipping requested"
   anomaly_scoring:
-    type: agentic.tools.builtin:AnomalyScoringTool
+    type: agx.tools.builtin:AnomalyScoringTool

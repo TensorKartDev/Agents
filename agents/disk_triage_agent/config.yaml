@@ -2,7 +2,7 @@ name: Disk Triage Workflow
 description: Disk usage triage that uses df/du output to decide cleanup guidance.
 
 defaults:
-  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_provider: agx.llm.provider:OllamaProvider
   llm_params:
     model: llama3.2
 
@@ -65,4 +65,4 @@ tasks:
 
 tools:
   disk_usage_triage:
-    type: agentic.tools.builtin:DiskUsageTriageTool
+    type: agx.tools.builtin:DiskUsageTriageTool

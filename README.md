@@ -1,8 +1,8 @@
-# Agentic Framework
+# AGX Framework v0.2.0
 
-An enterprise-grade framework for building, operating, and scaling intelligent agent workflows. Agentic is designed to help teams ship production agents quickly while keeping governance, safety, and extensibility first-class.
+An enterprise-grade framework for building, operating, and scaling intelligent agent workflows. AGX is designed to help teams ship production agents quickly while keeping governance, safety, and extensibility first-class.
 
-**Why teams adopt Agentic**
+**Why teams adopt AGX**
 - **Config-first orchestration**: model, tools, tasks, and approvals are defined in YAML so you can iterate without code churn.
 - **Enterprise controls**: human-in-the-loop checkpoints, auditable runs, and artifact capture are built in.
 - **Tooling flexibility**: plug in internal systems via a registry rather than rewriting planners.
@@ -15,9 +15,9 @@ An enterprise-grade framework for building, operating, and scaling intelligent a
 - Extensible tool registry with reusable implementations.
 - Practical reference workflows for hardware penetration testing, sales order investigation, and edge/on-board inference.
 
-## Build agents with Agentic
+## Build agents with AGX
 
-Agentic is optimized for agent creators. You define intent and capabilities in YAML, plug in tools, and register your agent so teams can run it safely through the shared UI and CLI.
+AGX is optimized for agent creators. You define intent and capabilities in YAML, plug in tools, and register your agent so teams can run it safely through the shared UI and CLI.
 
 ### 1) Create an agent package
 
@@ -114,7 +114,7 @@ Installation and environment setup are documented separately:
 .
 ├── pyproject.toml          # Project metadata and dependencies
 ├── README.md
-├── src/agentic
+├── src/agx
 │   ├── __init__.py
 │   ├── cli.py              # Typer CLI entrypoint
 │   ├── config.py           # YAML-driven agent/task configuration utilities
@@ -161,7 +161,7 @@ Point a configuration at the built-in `OllamaProvider` to run your self-hosted M
 
 ```yaml
 defaults:
-  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_provider: agx.llm.provider:OllamaProvider
   llm_params:
     model: llama3
     host: http://127.0.0.1:11434
@@ -183,7 +183,7 @@ tasks:
     agent: recon_agent
 agents:
   recon_agent:
-    llm_provider: agentic.llm.provider:ConsoleEchoProvider
+    llm_provider: agx.llm.provider:ConsoleEchoProvider
     tools: [nmap_scan, firmware_diff]
     planning:
       max_iterations: 4
@@ -198,7 +198,7 @@ The CLI resolves the YAML, registers tools, builds agents, and runs the orchestr
 
 ## Extending the framework
 
-- Create new packages under `src/agentic/tools` or an external repository.
+- Create new packages under `src/agx/tools` or an external repository.
 - Plug in vector memories, graph planners, streaming observers, etc.
 - Deploy via containers and customise configs for your environment.
 
@@ -227,16 +227,16 @@ Outputs include real stdout/stderr from the commands. If a dependency is missing
 
 ## Engines & Microsoft Autogen integration
 
-By default `agentic run` executes tasks through the Microsoft Agent Framework (Autogen) and calls your Ollama models as the LLM backend. The YAML-defined tools are registered as Autogen functions, so the planner automatically decides when to invoke them. Force an engine explicitly with:
+By default `agx run` executes tasks through the Microsoft Agent Framework (Autogen) and calls your Ollama models as the LLM backend. The YAML-defined tools are registered as Autogen functions, so the planner automatically decides when to invoke them. Force an engine explicitly with:
 
 ```bash
-agentic run examples/configs/hardware_pen_test.yaml --engine autogen
+agx run examples/configs/hardware_pen_test.yaml --engine autogen
 ```
 
 Switch back to the legacy JSON-contract planner (useful for debugging prompt issues or collecting per-iteration traces) via:
 
 ```bash
-agentic run examples/configs/hardware_pen_test.yaml --engine legacy --show-trace
+agx run examples/configs/hardware_pen_test.yaml --engine legacy --show-trace
 ```
 
 Both engines consume the same configs; the Autogen engine aligns with Microsoft’s latest agent framework guidance.
@@ -246,22 +246,22 @@ Both engines consume the same configs; the Autogen engine aligns with Microsoft�
 Launch the FastAPI dashboard (serves a static HTML/JS app) to monitor and control runs from a browser:
 
 ```bash
-uvicorn agentic.web.server:app --reload
+uvicorn agx.web.server:app --reload
 ```
 
 Then open `http://127.0.0.1:8000`:
 
 - Pick a workflow card (or enter a custom config path), choose an engine, and click **Start**. The button toggles to **Stop** while running; click it to cancel the workflow.
 - Watch tasks move from pending → thinking → completed with durations, progress, outputs, and a live mission console log.
-- “Active workflows” shows in-progress runs with % completion; the UI is mobile-friendly and lives under `src/agentic/web/index.html` with supporting assets in the same folder.
+- “Active workflows” shows in-progress runs with % completion; the UI is mobile-friendly and lives under `src/agx/web/index.html` with supporting assets in the same folder.
 
-Run in production with `uvicorn agentic.web.server:app --host 0.0.0.0 --port 8000` or behind your preferred ASGI server/reverse proxy.
+Run in production with `uvicorn agx.web.server:app --host 0.0.0.0 --port 8000` or behind your preferred ASGI server/reverse proxy.
 
 ### Creating your own agents
 
 - Drop a manifest under `agents/<slug>/agent.yaml` (or `agent.yml`) with `name`, `description`, optional `icon`, and a `config_path` or inline config. Add optional assets/code alongside it.
 - Restart the FastAPI server; the Admin Web UI auto-discovers cards from `/api/agents`, so agent creators never touch UI code.
-- Run the same config via CLI: `agentic run agents/<slug>/agent.yaml --engine autogen` (or `--engine legacy`).
+- Run the same config via CLI: `agx run agents/<slug>/agent.yaml --engine autogen` (or `--engine legacy`).
 - See `docs/creating_agents.md` for a short, copy-pasteable agent manifest and validation tips.
 
 Manifest metadata such as `inputs`, `outputs`, `capabilities`, `version`, `compatibility`, and `pricing` is supported and validated when agents are discovered. Invalid manifests are skipped with user-friendly errors in the server logs.
@@ -274,4 +274,4 @@ Use the included `pytest` dependency to verify tools, planners, or integrations:
 pytest
 ```
 
-The modules are intentionally lightweight to make it easy to adapt the framework to very different agentic workloads. Add your own test suites under `tests/` as needed.
+The modules are intentionally lightweight to make it easy to adapt the framework to very different agx workloads. Add your own test suites under `tests/` as needed.

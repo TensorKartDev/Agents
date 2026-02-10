@@ -1,7 +1,7 @@
 name: edge-inference-pilot
 description: Plan and monitor an edge/on-board AI deployment.
 defaults:
-  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_provider: agx.llm.provider:OllamaProvider
   llm_params:
     model: gpt-oss
     host: http://localhost:11434
@@ -30,6 +30,6 @@ tasks:
 
 tools:
   edge_deployment_planner:
-    type: agentic.tools.builtin:EdgeDeploymentPlannerTool
+    type: agx.tools.builtin:EdgeDeploymentPlannerTool
   anomaly_scoring:
-    type: agentic.tools.builtin:AnomalyScoringTool
+    type: agx.tools.builtin:AnomalyScoringTool

@@ -1,7 +1,7 @@
 [project]
-name = "agentic-template"
-version = "0.1.0"
-description = "Reusable agentic system starter for multi-domain projects"
+name = "agx-framework"
+dynamic = ["version"]
+description = "Enterprise-grade agent workflow framework"
 readme = "README.md"
 authors = [{ name = "Agentic Starter" }]
 requires-python = ">=3.10"
@@ -22,11 +22,15 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=65", "wheel"]
+requires = ["setuptools>=65", "wheel", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+
 [project.scripts]
-agentic = "agentic.cli:app"
+agx = "agx.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

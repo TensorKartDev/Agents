@@ -1,7 +1,7 @@
 name: firmware-penetration-workflow
 description: Multi-phase agent orchestration for firmware reverse engineering and pentesting.
 defaults:
-  llm_provider: agentic.llm.provider:OllamaProvider
+  llm_provider: agx.llm.provider:OllamaProvider
   llm_params:
     model: llama3.2
     host: http://localhost:11434
@@ -116,18 +116,18 @@ tasks:
 
 tools:
   firmware_intake:
-    type: agentic.tools.builtin:FirmwareIntakeTool
+    type: agx.tools.builtin:FirmwareIntakeTool
   firmware_format_identifier:
-    type: agentic.tools.builtin:FirmwareFormatIdentifierTool
+    type: agx.tools.builtin:FirmwareFormatIdentifierTool
   architecture_inference:
-    type: agentic.tools.builtin:ArchitectureInferenceTool
+    type: agx.tools.builtin:ArchitectureInferenceTool
   firmware_section_extractor:
-    type: agentic.tools.builtin:FirmwareSectionExtractorTool
+    type: agx.tools.builtin:FirmwareSectionExtractorTool
   firmware_static_analyzer:
-    type: agentic.tools.builtin:FirmwareStaticAnalyzerTool
+    type: agx.tools.builtin:FirmwareStaticAnalyzerTool
   secret_scanner:
-    type: agentic.tools.builtin:SecretScannerTool
+    type: agx.tools.builtin:SecretScannerTool
   weakness_profiler:
-    type: agentic.tools.builtin:WeaknessProfilerTool
+    type: agx.tools.builtin:WeaknessProfilerTool
   verification_planner:
-    type: agentic.tools.builtin:VerificationPlannerTool
+    type: agx.tools.builtin:VerificationPlannerTool
