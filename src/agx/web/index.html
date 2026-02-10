@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AGX Agentic Runner</title>
+    <link href="/static/bootstrap.css" rel="stylesheet" />
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+    <link href="/static/app.css" rel="stylesheet" />
+  </head>
+  <body class="py-4">
+    <div class="container">
+      <div class="glass-card p-4 mb-4">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <div>
+            <h1 class="display-6 fw-bold neon mb-1"><i class="bi bi-cpu"></i> AGX Agentic Control Panel</h1>
+            <p class="text-secondary mb-0">Build, deploy and run your Agents</p>
+          </div>
+          <div class="text-end d-flex align-items-center gap-2">
+            <span class="badge bg-info text-dark"><i class="bi bi-broadcast"></i> LIVE</span>
+            <span class="badge bg-dark text-light" id="app-version">v0.0.0</span>
+          </div>
+        </div>
+        <hr class="border-primary opacity-25" />
+        <div class="mb-3">
+          <label class="form-label text-uppercase small"><i class="bi bi-grid-3x3-gap"></i> Select Agent Workflow</label>
+          <div class="row g-2" id="config-cards-container"></div>
+        </div>
+        <input type="hidden" id="engine" value="autogen" />
+        <div class="mt-3 active-runs-card">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="text-uppercase text-secondary small"><i class="bi bi-activity"></i> Workflows</div>
+            <span class="badge bg-primary"><i class="bi bi-clock-history"></i> Live + history</span>
+          </div>
+          <div id="active-runs-list" class="small text-secondary">No workflows yet.</div>
+        </div>
+      </div>
+
+      <div class="glass-card p-4 mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <div>
+            <h3 class="h5 text-info mb-0"><i class="bi bi-terminal"></i> Mission Console</h3>
+            <small class="text-secondary">Focused updates per workflow</small>
+          </div>
+          <div class="text-end">
+            <span class="text-secondary small"><i class="bi bi-mouse"></i> Click start to open a tab</span>
+          </div>
+        </div>
+        <ul class="nav nav-tabs" id="mission-tabs"></ul>
+        <div id="mission-tab-contents" class="tab-content mt-3"></div>
+        <!-- Legacy placeholders to avoid errors if older scripts reference them -->
+        <div id="plan-container" style="display:none;"></div>
+        <div id="tasks-list" style="display:none;"></div>
+        <div id="outputs" style="display:none;"></div>
+        <div id="output-list" style="display:none;"></div>
+        <div id="global-progress" style="display:none;"></div>
+        <div id="global-progress-label" style="display:none;"></div>
+        <div id="engine-label" style="display:none;"></div>
+        <div id="project-title" style="display:none;"></div>
+        <div id="run-summary" style="display:none;"></div>
+        <div id="log" style="display:none;"></div>
+      </div>
+    </div>
+
+    <script src="/static/bootstrap.js"></script>
+    <script src="/static/app.js?v=13"></script>
+  </body>
+</html>
