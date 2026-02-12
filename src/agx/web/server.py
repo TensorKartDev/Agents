@@ -28,8 +28,8 @@ from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
 from ..persistence import PostgresRunStore
-
-
+from dotenv import load_dotenv
+load_dotenv()
 def _load_structured(text: Any) -> Any:
     if isinstance(text, (dict, list)):
         return text
@@ -111,7 +111,10 @@ if STATIC_IMG.exists():
 @app.on_event("startup")
 async def init_run_store() -> None:
     global RUN_STORE
-    db_url = os.getenv("AGX_DB_URL", "").strip()
+    #db_url = os.getenv("AGX_DB_URL", "").strip()
+    db_url = "dbname=agx user=admin password= host=localhost port=5432"
+
+    print(db_url, "DB")
     if not db_url:
         return
     RUN_STORE = PostgresRunStore(db_url)
