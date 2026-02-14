@@ -10,124 +10,120 @@ agents:
   firmware_agent:
     description: Executes the bare-metal/RTOS firmware workflow from intake to verification.
     tools:
+      - firmware_directory_list
+      - firmware_entropy_check
       - firmware_intake
-      - firmware_format_identifier
-      - architecture_inference
-      - firmware_section_extractor
-      - firmware_static_analyzer
-      - secret_scanner
-      - weakness_profiler
+      - firmware_os_identifier
+      - firmware_hex_to_bin
+      - firmware_key_finder
       - verification_planner
     planning:
       max_iterations: 4
 
-# Each task provides structured input that mirrors the workflow diagrams/cheat sheets.
+# Workflow aligned to the provided bash-command flow map.
 tasks:
-  - id: project-metadata
+  - id: firmware-intake
     type: human_input
     agent: firmware_agent
-    description: Provide project metadata and firmware paths.
+    description: Enter firmware working directory and firmware file path.
     ui:
-      title: Firmware Intake
-      description: Enter the local filesystem paths for the project doc and firmware image.
+      title: Firmware workflow intake
+      description: Provide local paths used in the firmware penetration workflow.
       fields:
-        - id: project_doc
-          label: Project doc path (Word/PDF)
+        - id: firmware_dir
+          label: Firmware working directory
           kind: path
           required: true
         - id: firmware_path
-          label: Firmware image path
+          label: Firmware image (.hex/.bin)
           kind: path
           required: true
 
-  - id: consent
-    type: human_approval
+  - id: 01-add-firmware
+    type: tool_run
+    tool: firmware_directory_list
     agent: firmware_agent
-    description: Confirm authorization to proceed with firmware analysis.
-    reason: User consent required before running analysis tools.
-    depends_on: [project-metadata]
-
-  - id: intake
-    agent: firmware_agent
-    description: Decide decompression path and OS handling for the provided firmware image.
-    depends_on: [consent]
+    description: Enter directory and list files (cd, ls).
+    depends_on: [firmware-intake]
     input:
-      path: /path/to/firmware.bin  # replace with your firmware image path
+      path: "{{inputs.firmware-intake.firmware_dir}}"
+
+  - id: 02-entropy-check
+    type: tool_run
+    tool: firmware_entropy_check
+    agent: firmware_agent
+    description: Check firmware entropy range and compression/encryption likelihood.
+    depends_on: [01-add-firmware]
+    input:
+      path: "{{inputs.firmware-intake.firmware_path}}"
+      timeout: 300
+
+  - id: 03-extract-firmware
+    type: tool_run
+    tool: firmware_intake
+    agent: firmware_agent
+    description: Extract firmware with binwalk (-e) for downstream OS and magic checks.
+    depends_on: [02-entropy-check]
+    input:
+      path: "{{inputs.firmware-intake.firmware_path}}"
       extract: true
       output_dir: ./artifacts/firmware_extract
 
-  - id: format-identification
+  - id: 03-fw-ident
+    type: tool_run
+    tool: firmware_os_identifier
     agent: firmware_agent
-    description: Identify firmware container via magic bytes.
-    depends_on: [consent]
+    description: Check OS family (Bare metal/RTOS/Linux/Other), hexdump, and ARM magic heuristic.
+    depends_on: [03-extract-firmware]
     input:
-      path: /path/to/firmware.bin
+      path: "{{inputs.firmware-intake.firmware_path}}"
+      timeout: 180
 
-  - id: architecture-deduction
+  - id: 04-hex2bin
+    type: tool_run
+    tool: firmware_hex_to_bin
     agent: firmware_agent
-    description: Infer architecture/toolchain characteristics.
-    depends_on: [consent]
+    description: Optional conversion from extracted hex to binary using objcopy.
+    depends_on: [03-fw-ident]
     input:
-      path: /path/to/firmware.bin
+      path: "{{inputs.firmware-intake.firmware_path}}"
+      output_path: ./artifacts/firmware_extract/Firmex.bin
 
-  - id: section-extraction
+  - id: 05-find-key
+    type: tool_run
+    tool: firmware_key_finder
     agent: firmware_agent
-    description: Summarize carved sections for tooling handoff.
-    depends_on: [consent]
+    description: Run strings and grep-like key/password discovery from firmware binary/text.
+    depends_on: [04-hex2bin]
     input:
-      path: /path/to/firmware.bin
-      extract: false  # set true to carve with binwalk --dd
+      path: ./artifacts/firmware_extract/Firmex.bin
+      output_txt: ./artifacts/firmware_extract/save.txt
+      min_len: 6
+      pattern: "(?i)(key|password|passwd|token|secret|private)"
 
-  - id: static-review
+  - id: ghidra-handoff
     agent: firmware_agent
-    description: Perform configuration/component review.
-    depends_on: [consent]
-    input:
-      path: /path/to/firmware.bin
-      # Override patterns to hunt for specific services if needed.
-      patterns: ["ssh", "telnet", "dropbear", "httpd", "ftp", "ota", "upgrade", "busybox", "openssl", "shadow", "passwd"]
-
-  - id: secret-harvest
-    agent: firmware_agent
-    description: Scan for secrets/keys in carved blobs.
-    depends_on: [consent]
-    input:
-      path: /path/to/firmware.bin
-
-  - id: weakness-profile
-    agent: firmware_agent
-    description: Combine findings into a vulnerability profile.
-    depends_on: [consent]
-    input:
-      path: /path/to/firmware.bin
-      rtos: unknown
-      crypto: unknown
-      updater: unknown
-
-  - id: verification-plan
-    agent: firmware_agent
-    description: Produce verification checklist for exploit/reporting phase.
-    depends_on: [consent]
+    description: Produce analyst handoff checklist for opening firmware binary in Ghidra.
+    depends_on: [05-find-key]
     input:
       findings:
-        - Telnet exposed without auth
-        - Unsigned bootloader updates
-        - Hard-coded admin credentials
+        - Entropy profile reviewed
+        - OS and ARM magic heuristic checked
+        - strings output and key hits saved to save.txt
+        - Firmex.bin prepared for reverse engineering
 
 tools:
+  firmware_directory_list:
+    type: agx.tools.builtin:FirmwareDirectoryListTool
+  firmware_entropy_check:
+    type: agx.tools.builtin:FirmwareEntropyCheckTool
   firmware_intake:
     type: agx.tools.builtin:FirmwareIntakeTool
-  firmware_format_identifier:
-    type: agx.tools.builtin:FirmwareFormatIdentifierTool
-  architecture_inference:
-    type: agx.tools.builtin:ArchitectureInferenceTool
-  firmware_section_extractor:
-    type: agx.tools.builtin:FirmwareSectionExtractorTool
-  firmware_static_analyzer:
-    type: agx.tools.builtin:FirmwareStaticAnalyzerTool
-  secret_scanner:
-    type: agx.tools.builtin:SecretScannerTool
-  weakness_profiler:
-    type: agx.tools.builtin:WeaknessProfilerTool
+  firmware_os_identifier:
+    type: agx.tools.builtin:FirmwareOsIdentifierTool
+  firmware_hex_to_bin:
+    type: agx.tools.builtin:FirmwareHexToBinTool
+  firmware_key_finder:
+    type: agx.tools.builtin:FirmwareKeyFinderTool
   verification_planner:
     type: agx.tools.builtin:VerificationPlannerTool

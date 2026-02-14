@@ -661,6 +661,170 @@ class WeaknessProfilerTool(Tool):
         return ToolResult(content="\n".join(details), metadata=metadata)
 
 
+class FirmwareDirectoryListTool(Tool):
+    """Lists files in the selected firmware working directory."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        path_value = payload.get("path") or "."
+        target = Path(str(path_value))
+        if not target.exists():
+            return ToolResult(content=f"Path not found: {target}", metadata={"error": "missing_path"})
+        if not target.is_dir():
+            return ToolResult(content=f"Not a directory: {target}", metadata={"error": "not_directory"})
+        result = _run_command(["ls", "-la", str(target)])
+        content = _summarize("ls -la", result)
+        return ToolResult(content=content, metadata={"path": str(target)})
+
+
+class FirmwareEntropyCheckTool(Tool):
+    """Runs entropy checks to determine whether firmware appears compressed/encrypted."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for entropy checks.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+
+        reports: List[str] = []
+        if _command_available("binwalk"):
+            reports.append(
+                _summarize(
+                    "binwalk --entropy",
+                    _run_command(["binwalk", "--entropy", "--nobanner", str(firmware_path)], timeout=int(payload.get("timeout", 300))),
+                )
+            )
+        elif _command_available("ent"):
+            reports.append(_summarize("ent", _run_command(["ent", str(firmware_path)], timeout=int(payload.get("timeout", 300)))))
+        else:
+            return ToolResult(
+                content="Install binwalk or ent to run entropy checks.",
+                metadata={"error": "missing_entropy_tool"},
+            )
+
+        return ToolResult(content="\n\n".join(reports), metadata={"path": str(firmware_path)})
+
+
+class FirmwareOsIdentifierTool(Tool):
+    """Identifies likely OS family and checks ARM magic-byte heuristic."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for OS identification.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+
+        reports: List[str] = []
+        file_result = _run_command(["file", str(firmware_path)])
+        reports.append(_summarize("file", file_result))
+        file_text = (file_result.get("stdout", "") + " " + file_result.get("stderr", "")).lower()
+
+        strings_result = _run_command(["strings", "-n", "6", str(firmware_path)], timeout=int(payload.get("timeout", 180)))
+        sample_lines = strings_result.get("stdout", "").splitlines()[:2000]
+        sample_blob = "\n".join(sample_lines).lower()
+        reports.append(_summarize("strings -n 6", strings_result))
+
+        os_guess = "Other"
+        if "linux" in file_text or any(token in sample_blob for token in ["busybox", "/etc/init", "/proc/", "linux"]):
+            os_guess = "Linux"
+        elif any(token in sample_blob for token in ["freertos", "zephyr", "threadx", "vxworks", "nucleus"]):
+            os_guess = "RTOS"
+        elif any(token in sample_blob for token in ["bare metal", "no operating system", "startup.s"]):
+            os_guess = "Bare metal"
+
+        hexdump_result = _run_command(["hexdump", "-C", "-n", "64", str(firmware_path)])
+        reports.append(_summarize("hexdump -C -n 64", hexdump_result))
+        arm_magic = "unknown"
+        for line in hexdump_result.get("stdout", "").splitlines():
+            if "|" in line and line.strip().startswith("00000000"):
+                # Heuristic from flow: first word resembles 0x2000 for ARM vectors.
+                byte_cols = line.split("|", 1)[0].split()[1:5]
+                if len(byte_cols) == 4:
+                    word = "".join(reversed(byte_cols)).lower()
+                    if word.startswith("000020"):
+                        arm_magic = "matched_0x2000_heuristic"
+                    else:
+                        arm_magic = f"not_matched ({word})"
+                break
+
+        reports.append(f"OS classification: {os_guess}")
+        reports.append(f"ARM magic heuristic: {arm_magic}")
+        return ToolResult(content="\n\n".join(reports), metadata={"path": str(firmware_path), "os_guess": os_guess, "arm_magic": arm_magic})
+
+
+class FirmwareHexToBinTool(Tool):
+    """Converts Intel HEX firmware to BIN via objcopy."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for hex->bin conversion.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+        if not _command_available("objcopy"):
+            return ToolResult(content="objcopy not available on PATH.", metadata={"error": "missing_objcopy"})
+
+        output_path = Path(str(payload.get("output_path") or firmware_path.with_suffix(".bin")))
+        result = _run_command(["objcopy", "-I", "ihex", "-O", "binary", str(firmware_path), str(output_path)])
+        summary = _summarize("objcopy -I ihex -O binary", result)
+        if result.get("code") != 0:
+            return ToolResult(content=summary, metadata={"error": "conversion_failed", "path": str(firmware_path)})
+        return ToolResult(content=summary, metadata={"path": str(firmware_path), "output_path": str(output_path)})
+
+
+class FirmwareKeyFinderTool(Tool):
+    """Runs strings and extracts potential keys/passwords into a text artifact."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for key search.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+        if not _command_available("strings"):
+            return ToolResult(content="strings not available on PATH.", metadata={"error": "missing_strings"})
+
+        min_len = str(int(payload.get("min_len", 6)))
+        strings_result = _run_command(["strings", "-n", min_len, str(firmware_path)], timeout=int(payload.get("timeout", 180)))
+        lines = strings_result.get("stdout", "").splitlines()
+        out_path = Path(str(payload.get("output_txt") or firmware_path.with_name("save.txt")))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(lines), encoding="utf-8", errors="ignore")
+
+        pattern = re.compile(payload.get("pattern") or r"(?i)(key|password|passwd|token|secret|private)")
+        hits = [line for line in lines if pattern.search(line)]
+        preview = "\n".join(hits[:50]) if hits else "No key/password-like strings matched."
+        content = "\n\n".join(
+            [
+                _summarize(f"strings -n {min_len}", strings_result),
+                f"Saved strings output: {out_path}",
+                f"Key hits: {len(hits)}",
+                preview,
+            ]
+        )
+        return ToolResult(content=content, metadata={"path": str(firmware_path), "output_txt": str(out_path), "hits": str(len(hits))})
+
+
 class DiskUsageTriageTool(Tool):
     """Uses df/du to assess disk usage and recommend cleanup targets."""
 
