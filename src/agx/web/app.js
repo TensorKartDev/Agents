@@ -71,7 +71,10 @@ function ensureTab(runId, label) {
         <div class="terminal-card p-3">
           <div class="terminal-header">
             <div class="terminal-title">Terminal Output</div>
-            <div class="terminal-meta">Run: ${runId.slice(0, 8)}</div>
+            <div class="d-flex align-items-center gap-2">
+              <button type="button" class="btn btn-sm btn-outline-light" data-role="copy-log">Copy</button>
+              <div class="terminal-meta">Run: ${runId.slice(0, 8)}</div>
+            </div>
           </div>
           <div class="final-summary d-none" data-role="final-summary"></div>
           <pre class="terminal-log" data-role="log"></pre>
@@ -95,6 +98,7 @@ function ensureTab(runId, label) {
     engineLabel: pane.querySelector('[data-role="engine-label"]'),
     projectTitle: pane.querySelector('[data-role="project-title"]'),
     runSummary: pane.querySelector('[data-role="run-summary"]'),
+    copyLogButton: pane.querySelector('[data-role="copy-log"]'),
   };
 
   const tabState = {
@@ -104,6 +108,9 @@ function ensureTab(runId, label) {
     elements: refs,
   };
   state.tabs[runId] = tabState;
+  if (refs.copyLogButton) {
+    refs.copyLogButton.onclick = () => copyTerminalLog(runId);
+  }
   return tabState;
 }
 
@@ -879,6 +886,40 @@ function appendLog(kind, message) {
   state.logEl.scrollTop = state.logEl.scrollHeight;
   if (kind === 'final') {
     setFinalSummary(text);
+  }
+}
+
+async function copyTerminalLog(runId) {
+  const tab = getTab(runId) || getTab(state.activeTabId);
+  if (!tab || !tab.elements || !tab.elements.log) return;
+  const text = tab.elements.log.textContent || '';
+  if (!text.trim()) return;
+  const btn = tab.elements.copyLogButton;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const el = document.createElement('textarea');
+      el.value = text;
+      el.setAttribute('readonly', 'readonly');
+      el.style.position = 'absolute';
+      el.style.left = '-9999px';
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
+    if (btn) {
+      const original = btn.textContent || 'Copy';
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = original; }, 1200);
+    }
+  } catch (err) {
+    if (btn) {
+      const original = btn.textContent || 'Copy';
+      btn.textContent = 'Failed';
+      setTimeout(() => { btn.textContent = original; }, 1200);
+    }
   }
 }
 

@@ -970,6 +970,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
               output_sections.append(f"No files larger than {min_mb} MiB found under {path_value}.")
 
             output = "\n\n".join(output_sections)
+            tool_metadata = {}
           else:
             def run_tool():
               result = tool.run(
@@ -978,17 +979,37 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
                   agent_name=getattr(spec, "agent", "tool"),
                   task_id=spec.id,
                   iteration=0,
-                  metadata={"tool": tool_name, "host": "local"},
+                  metadata={"tool": tool_name, "host": "local", "run_id": run_id},
                 ),
               )
-              return result.content
-            output = await asyncio.to_thread(run_tool)
+              return result.content, (result.metadata or {})
+            output, tool_metadata = await asyncio.to_thread(run_tool)
           t1 = time.perf_counter()
           duration = t1 - t0
-          result_store[spec.id] = {"output": output, "duration": duration}
+          item: Dict[str, Any] = {"output": output, "duration": duration}
+          if isinstance(tool_metadata, dict):
+            item["metadata"] = tool_metadata
+            for k, v in tool_metadata.items():
+              if isinstance(v, (str, int, float, bool)):
+                item[k] = v
+          result_store[spec.id] = item
           results[spec.id] = result_store[spec.id]
+          if isinstance(tool_metadata, dict) and tool_metadata.get("error") and not getattr(spec, "continue_on_error", False):
+            await broadcast(
+              {
+                "type": "status",
+                "task_id": spec.id,
+                "status": "failed",
+                "output": output,
+                "duration": duration,
+              }
+            )
+            stopped_early = True
+            break
           state.completed_tasks += 1
           persist_run()
+          if output:
+            await broadcast({"type": "console", "message": str(output), "task_id": spec.id})
           await broadcast(
             {
               "type": "status",

@@ -101,6 +101,7 @@ class TaskSpec:
     ui: Optional[Dict[str, Any]] = None
     tool: Optional[str] = None
     source_task: Optional[str] = None
+    continue_on_error: bool = False
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "TaskSpec":
@@ -138,6 +139,7 @@ class TaskSpec:
             ui=(dict(data.get("ui", {})) if isinstance(data.get("ui"), Mapping) else None),
             tool=(str(data.get("tool")) if data.get("tool") is not None else None),
             source_task=(str(data.get("source_task")) if data.get("source_task") is not None else None),
+            continue_on_error=bool(data.get("continue_on_error", False)),
         )
 
 

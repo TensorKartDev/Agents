@@ -10,11 +10,13 @@ agents:
   firmware_agent:
     description: Executes the bare-metal/RTOS firmware workflow from intake to verification.
     tools:
+      - firmware_preflight
+      - firmware_format_detector
+      - firmware_prepare_binary
       - firmware_directory_list
       - firmware_entropy_check
-      - firmware_intake
+      - firmware_extract
       - firmware_os_identifier
-      - firmware_hex_to_bin
       - firmware_key_finder
       - verification_planner
     planning:
@@ -48,81 +50,115 @@ tasks:
     input:
       path: "{{inputs.firmware-intake.firmware_dir}}"
 
-  - id: 02-entropy-check
+  - id: 00-preflight
+    type: tool_run
+    tool: firmware_preflight
+    agent: firmware_agent
+    description: Validate dependencies, inputs, and create isolated workspace for this run.
+    depends_on: [firmware-intake]
+    input:
+      path: "{{inputs.firmware-intake.firmware_path}}"
+      required_tools:
+        - file
+        - binwalk
+        - strings
+        - grep
+        - hexdump
+      optional_tools:
+        - objcopy
+        - srec_cat
+
+  - id: 01-format-detect
+    type: tool_run
+    tool: firmware_format_detector
+    agent: firmware_agent
+    description: Detect firmware format before branching to conversion/extraction.
+    depends_on: [00-preflight]
+    input:
+      path: "{{inputs.firmware-intake.firmware_path}}"
+
+  - id: 02-prepare-binary
+    type: tool_run
+    tool: firmware_prepare_binary
+    agent: firmware_agent
+    description: Convert Intel HEX to BIN (or reuse binary directly) before analysis.
+    depends_on: [01-format-detect]
+    input:
+      path: "{{inputs.firmware-intake.firmware_path}}"
+      detected_format: "{{results.01-format-detect.detected_format}}"
+      workspace_dir: "{{results.00-preflight.workspace_dir}}"
+      binary_path: "{{results.00-preflight.workspace_dir}}/prepared.bin"
+
+  - id: 03-entropy-check
     type: tool_run
     tool: firmware_entropy_check
     agent: firmware_agent
-    description: Check firmware entropy range and compression/encryption likelihood.
-    depends_on: [01-add-firmware]
+    description: Check entropy on prepared binary artifact.
+    depends_on: [02-prepare-binary]
     input:
-      path: "{{inputs.firmware-intake.firmware_path}}"
+      path: "{{results.02-prepare-binary.binary_path}}"
       timeout: 300
 
-  - id: 03-extract-firmware
+  - id: 04-extract-firmware
     type: tool_run
-    tool: firmware_intake
+    tool: firmware_extract
     agent: firmware_agent
-    description: Extract firmware with binwalk (-e) for downstream OS and magic checks.
-    depends_on: [02-entropy-check]
+    description: Extract firmware in isolated workspace using binwalk.
+    depends_on: [03-entropy-check]
     input:
       path: "{{inputs.firmware-intake.firmware_path}}"
-      extract: true
-      output_dir: ./artifacts/firmware_extract
+      output_dir: "{{results.00-preflight.workspace_dir}}/extract"
+      timeout: 300
 
-  - id: 03-fw-ident
+  - id: 05-fw-ident
     type: tool_run
     tool: firmware_os_identifier
     agent: firmware_agent
-    description: Check OS family (Bare metal/RTOS/Linux/Other), hexdump, and ARM magic heuristic.
-    depends_on: [03-extract-firmware]
+    description: Check OS family and ARM magic heuristic on prepared binary.
+    depends_on: [04-extract-firmware]
     input:
       path: "{{inputs.firmware-intake.firmware_path}}"
+      extracted_path: "{{results.02-prepare-binary.binary_path}}"
       timeout: 180
 
-  - id: 04-hex2bin
-    type: tool_run
-    tool: firmware_hex_to_bin
-    agent: firmware_agent
-    description: Optional conversion from extracted hex to binary using objcopy.
-    depends_on: [03-fw-ident]
-    input:
-      path: "{{inputs.firmware-intake.firmware_path}}"
-      output_path: ./artifacts/firmware_extract/Firmex.bin
-
-  - id: 05-find-key
+  - id: 06-find-key
     type: tool_run
     tool: firmware_key_finder
     agent: firmware_agent
-    description: Run strings and grep-like key/password discovery from firmware binary/text.
-    depends_on: [04-hex2bin]
+    description: Run strings and key discovery on prepared binary.
+    depends_on: [05-fw-ident]
     input:
-      path: ./artifacts/firmware_extract/Firmex.bin
-      output_txt: ./artifacts/firmware_extract/save.txt
+      path: "{{results.02-prepare-binary.binary_path}}"
+      output_txt: "{{results.00-preflight.workspace_dir}}/save.txt"
       min_len: 6
-      pattern: "(?i)(key|password|passwd|token|secret|private)"
+      grep_term: Key
 
   - id: ghidra-handoff
     agent: firmware_agent
     description: Produce analyst handoff checklist for opening firmware binary in Ghidra.
-    depends_on: [05-find-key]
+    depends_on: [06-find-key]
     input:
       findings:
         - Entropy profile reviewed
         - OS and ARM magic heuristic checked
         - strings output and key hits saved to save.txt
-        - Firmex.bin prepared for reverse engineering
+        - Prepared binary ready for reverse engineering
 
 tools:
+  firmware_preflight:
+    type: agx.tools.builtin:FirmwarePreflightTool
+  firmware_format_detector:
+    type: agx.tools.builtin:FirmwareFormatDetectorTool
+  firmware_prepare_binary:
+    type: agx.tools.builtin:FirmwarePrepareBinaryTool
   firmware_directory_list:
     type: agx.tools.builtin:FirmwareDirectoryListTool
   firmware_entropy_check:
     type: agx.tools.builtin:FirmwareEntropyCheckTool
-  firmware_intake:
-    type: agx.tools.builtin:FirmwareIntakeTool
+  firmware_extract:
+    type: agx.tools.builtin:FirmwareExtractTool
   firmware_os_identifier:
     type: agx.tools.builtin:FirmwareOsIdentifierTool
-  firmware_hex_to_bin:
-    type: agx.tools.builtin:FirmwareHexToBinTool
   firmware_key_finder:
     type: agx.tools.builtin:FirmwareKeyFinderTool
   verification_planner:

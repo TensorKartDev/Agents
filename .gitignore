@@ -28,3 +28,5 @@ dist/
 meta/
 .agx
 artifacts/*
+extractions/*   
+*.hex.png

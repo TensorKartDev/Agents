@@ -674,8 +674,14 @@ class FirmwareDirectoryListTool(Tool):
             return ToolResult(content=f"Path not found: {target}", metadata={"error": "missing_path"})
         if not target.is_dir():
             return ToolResult(content=f"Not a directory: {target}", metadata={"error": "not_directory"})
-        result = _run_command(["ls", "-la", str(target)])
-        content = _summarize("ls -la", result)
+        # Flow mapping: cd <dir> && ls
+        result = _run_command(["ls", "-la"], cwd=target)
+        content = "\n\n".join(
+            [
+                f"Command: cd {target} && ls -la",
+                _summarize("ls -la", result),
+            ]
+        )
         return ToolResult(content=content, metadata={"path": str(target)})
 
 
@@ -694,22 +700,64 @@ class FirmwareEntropyCheckTool(Tool):
             return ToolResult(content=validation_error, metadata={"error": "missing_file"})
 
         reports: List[str] = []
+        timeout = int(payload.get("timeout", 300))
+        found_any = False
+        if _command_available("ent"):
+            found_any = True
+            reports.append(f"Command: ent {firmware_path}")
+            reports.append(_summarize("ent", _run_command(["ent", str(firmware_path)], timeout=timeout)))
+        else:
+            reports.append("Command unavailable: ent")
         if _command_available("binwalk"):
+            found_any = True
+            reports.append(f"Command: binwalk --entropy {firmware_path}")
             reports.append(
                 _summarize(
                     "binwalk --entropy",
-                    _run_command(["binwalk", "--entropy", "--nobanner", str(firmware_path)], timeout=int(payload.get("timeout", 300))),
+                    _run_command(["binwalk", "--entropy", str(firmware_path)], timeout=timeout),
                 )
             )
-        elif _command_available("ent"):
-            reports.append(_summarize("ent", _run_command(["ent", str(firmware_path)], timeout=int(payload.get("timeout", 300)))))
         else:
-            return ToolResult(
-                content="Install binwalk or ent to run entropy checks.",
-                metadata={"error": "missing_entropy_tool"},
-            )
+            reports.append("Command unavailable: binwalk")
+        if not found_any:
+            return ToolResult(content="\n\n".join(reports), metadata={"error": "missing_entropy_tool", "path": str(firmware_path)})
 
         return ToolResult(content="\n\n".join(reports), metadata={"path": str(firmware_path)})
+
+
+class FirmwareExtractTool(Tool):
+    """Exact extraction step using binwalk -e <firmware>."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for extraction.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+        if not _command_available("binwalk"):
+            return ToolResult(content="binwalk not available on PATH.", metadata={"error": "missing_binwalk"})
+
+        timeout = int(payload.get("timeout", 300))
+        run_id = str(context.metadata.get("run_id", "")).strip() or "local"
+        output_dir = Path(str(payload.get("output_dir") or f"/tmp/agx_run_{run_id}/firmware_extract"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Keep command intent from flow while isolating extraction per run.
+        result = _run_command(["binwalk", "--extract", "--directory", str(output_dir), str(firmware_path)], timeout=timeout)
+        content = "\n\n".join(
+            [
+                f"Command: binwalk -e {firmware_path}",
+                f"Isolated workspace: {output_dir}",
+                _summarize("binwalk --extract --directory", result),
+            ]
+        )
+        md = {"path": str(firmware_path), "output_dir": str(output_dir)}
+        if result.get("code") != 0:
+            md["error"] = "extract_failed"
+        return ToolResult(content=content, metadata=md)
 
 
 class FirmwareOsIdentifierTool(Tool):
@@ -727,41 +775,55 @@ class FirmwareOsIdentifierTool(Tool):
             return ToolResult(content=validation_error, metadata={"error": "missing_file"})
 
         reports: List[str] = []
-        file_result = _run_command(["file", str(firmware_path)])
+        timeout = int(payload.get("timeout", 300))
+        extracted_file = payload.get("extracted_path") or payload.get("path")
+        extracted_path = Path(str(extracted_file))
+        if not extracted_path.exists():
+            return ToolResult(
+                content=f"Provide valid extracted firmware path for OS/magic checks: {extracted_path}",
+                metadata={"error": "missing_extracted_file", "path": str(extracted_path)},
+            )
+
+        file_result = _run_command(["file", str(extracted_path)])
+        reports.append(f"Command: file {extracted_path}")
         reports.append(_summarize("file", file_result))
         file_text = (file_result.get("stdout", "") + " " + file_result.get("stderr", "")).lower()
 
-        strings_result = _run_command(["strings", "-n", "6", str(firmware_path)], timeout=int(payload.get("timeout", 180)))
-        sample_lines = strings_result.get("stdout", "").splitlines()[:2000]
+        strings_result = _run_command(["strings", "-n", "6", str(extracted_path)], timeout=int(payload.get("timeout", 180)))
+        sample_lines = strings_result.get("stdout", "").splitlines()[:3000]
         sample_blob = "\n".join(sample_lines).lower()
+        reports.append(f"Command: strings -n 6 {extracted_path}")
         reports.append(_summarize("strings -n 6", strings_result))
 
         os_guess = "Other"
         if "linux" in file_text or any(token in sample_blob for token in ["busybox", "/etc/init", "/proc/", "linux"]):
             os_guess = "Linux"
-        elif any(token in sample_blob for token in ["freertos", "zephyr", "threadx", "vxworks", "nucleus"]):
+        elif any(token in sample_blob for token in ["freertos", "zephyr", "threadx", "vxworks", "nucleus", "rtos"]):
             os_guess = "RTOS"
-        elif any(token in sample_blob for token in ["bare metal", "no operating system", "startup.s"]):
+        elif any(token in sample_blob for token in ["startup", "vector table", "bare metal"]):
             os_guess = "Bare metal"
 
-        hexdump_result = _run_command(["hexdump", "-C", "-n", "64", str(firmware_path)])
-        reports.append(_summarize("hexdump -C -n 64", hexdump_result))
+        hexdump_result = _run_command(["hexdump", "-C", "-n", "128", str(extracted_path)])
+        reports.append(f"Command: hexdump {extracted_path} | head")
+        reports.append(_summarize("hexdump -C -n 128", hexdump_result))
         arm_magic = "unknown"
         for line in hexdump_result.get("stdout", "").splitlines():
-            if "|" in line and line.strip().startswith("00000000"):
-                # Heuristic from flow: first word resembles 0x2000 for ARM vectors.
-                byte_cols = line.split("|", 1)[0].split()[1:5]
-                if len(byte_cols) == 4:
-                    word = "".join(reversed(byte_cols)).lower()
-                    if word.startswith("000020"):
-                        arm_magic = "matched_0x2000_heuristic"
-                    else:
-                        arm_magic = f"not_matched ({word})"
+            parts = line.strip().split()
+            if len(parts) >= 3 and parts[0].startswith("0000000"):
+                # Flow heuristic: first vector word should indicate 0x2000 for ARM.
+                first_word = "".join(parts[1:3]).lower()
+                if "2000" in first_word:
+                    arm_magic = "matched_0x2000_heuristic"
+                else:
+                    arm_magic = f"not_matched ({first_word})"
                 break
 
         reports.append(f"OS classification: {os_guess}")
         reports.append(f"ARM magic heuristic: {arm_magic}")
-        return ToolResult(content="\n\n".join(reports), metadata={"path": str(firmware_path), "os_guess": os_guess, "arm_magic": arm_magic})
+        return ToolResult(
+            content="\n\n".join(reports),
+            metadata={"path": str(firmware_path), "extracted_path": str(extracted_path), "os_guess": os_guess, "arm_magic": arm_magic},
+        )
 
 
 class FirmwareHexToBinTool(Tool):
@@ -782,7 +844,12 @@ class FirmwareHexToBinTool(Tool):
 
         output_path = Path(str(payload.get("output_path") or firmware_path.with_suffix(".bin")))
         result = _run_command(["objcopy", "-I", "ihex", "-O", "binary", str(firmware_path), str(output_path)])
-        summary = _summarize("objcopy -I ihex -O binary", result)
+        summary = "\n\n".join(
+            [
+                f"Command: objcopy -I ihex -O binary {firmware_path} {output_path}",
+                _summarize("objcopy -I ihex -O binary", result),
+            ]
+        )
         if result.get("code") != 0:
             return ToolResult(content=summary, metadata={"error": "conversion_failed", "path": str(firmware_path)})
         return ToolResult(content=summary, metadata={"path": str(firmware_path), "output_path": str(output_path)})
@@ -810,19 +877,150 @@ class FirmwareKeyFinderTool(Tool):
         out_path = Path(str(payload.get("output_txt") or firmware_path.with_name("save.txt")))
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("\n".join(lines), encoding="utf-8", errors="ignore")
-
-        pattern = re.compile(payload.get("pattern") or r"(?i)(key|password|passwd|token|secret|private)")
-        hits = [line for line in lines if pattern.search(line)]
-        preview = "\n".join(hits[:50]) if hits else "No key/password-like strings matched."
+        grep_term = str(payload.get("grep_term") or "Key")
+        grep_result = _run_command(["grep", grep_term, str(out_path)])
+        hits = grep_result.get("stdout", "").splitlines()
+        preview = "\n".join(hits[:50]) if hits else f'No matches for grep "{grep_term}"'
         content = "\n\n".join(
             [
+                f"Command: strings -n {min_len} {firmware_path} > {out_path}",
                 _summarize(f"strings -n {min_len}", strings_result),
                 f"Saved strings output: {out_path}",
+                f'Command: grep "{grep_term}" {out_path}',
+                _summarize(f'grep "{grep_term}"', grep_result),
                 f"Key hits: {len(hits)}",
                 preview,
             ]
         )
-        return ToolResult(content=content, metadata={"path": str(firmware_path), "output_txt": str(out_path), "hits": str(len(hits))})
+        return ToolResult(content=content, metadata={"path": str(firmware_path), "output_txt": str(out_path), "hits": str(len(hits)), "grep_term": grep_term})
+
+
+class FirmwarePreflightTool(Tool):
+    """Preflight checks: dependencies, path validity, and isolated workspace creation."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for preflight.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+
+        run_id = str(context.metadata.get("run_id", "")).strip() or "local"
+        workspace = Path(str(payload.get("workspace_dir") or f"/tmp/agx_run_{run_id}"))
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        required = payload.get("required_tools") or ["file", "binwalk", "ent", "strings", "grep", "hexdump"]
+        optional = payload.get("optional_tools") or ["objcopy", "srec_cat"]
+        missing = [tool for tool in required if not _command_available(str(tool))]
+        missing_optional = [tool for tool in optional if not _command_available(str(tool))]
+        content_lines = [
+            f"Firmware path: {firmware_path}",
+            f"Workspace: {workspace}",
+            f"Required tools: {', '.join(required)}",
+            f"Missing tools: {', '.join(missing) if missing else 'none'}",
+            f"Optional tools: {', '.join(optional)}",
+            f"Missing optional tools: {', '.join(missing_optional) if missing_optional else 'none'}",
+        ]
+        md: Dict[str, str] = {
+            "path": str(firmware_path),
+            "workspace_dir": str(workspace),
+            "missing_tools": ",".join(missing),
+            "missing_optional_tools": ",".join(missing_optional),
+        }
+        if missing:
+            md["error"] = "missing_dependencies"
+        return ToolResult(content="\n".join(content_lines), metadata=md)
+
+
+class FirmwareFormatDetectorTool(Tool):
+    """Detects firmware format and classifies by branch for workflow decisions."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for format detection.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+
+        file_result = _run_command(["file", "-b", str(firmware_path)])
+        out = (file_result.get("stdout", "") + " " + file_result.get("stderr", "")).lower()
+        detected = "raw_binary"
+        if "intel hex" in out or firmware_path.suffix.lower() == ".hex":
+            detected = "intel_hex"
+        elif firmware_path.suffix.lower() in {".wic", ".img"} or "filesystem" in out:
+            detected = "disk_image"
+        content = "\n".join(
+            [
+                f"Command: file -b {firmware_path}",
+                _summarize("file -b", file_result),
+                f"Detected format: {detected}",
+            ]
+        )
+        return ToolResult(content=content, metadata={"path": str(firmware_path), "detected_format": detected})
+
+
+class FirmwarePrepareBinaryTool(Tool):
+    """Produces a binary artifact from HEX if needed, otherwise reuses original binary."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        firmware_path = _resolve_path(payload)
+        if not firmware_path:
+            return ToolResult(content="Provide firmware 'path' for binary preparation.", metadata={"error": "missing_path"})
+        validation_error = _validate_path(firmware_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+
+        detected = str(payload.get("detected_format") or "").strip() or ("intel_hex" if firmware_path.suffix.lower() == ".hex" else "raw_binary")
+        workspace = Path(str(payload.get("workspace_dir") or f"/tmp/agx_run_{context.metadata.get('run_id','local')}"))
+        workspace.mkdir(parents=True, exist_ok=True)
+        binary_path = Path(str(payload.get("binary_path") or workspace / "prepared.bin"))
+
+        if detected == "intel_hex":
+            if _command_available("objcopy"):
+                result = _run_command(["objcopy", "-I", "ihex", "-O", "binary", str(firmware_path), str(binary_path)])
+                content = "\n\n".join(
+                    [
+                        f"Command: objcopy -I ihex -O binary {firmware_path} {binary_path}",
+                        _summarize("objcopy -I ihex -O binary", result),
+                    ]
+                )
+            elif _command_available("srec_cat"):
+                result = _run_command(["srec_cat", str(firmware_path), "-Intel", "-o", str(binary_path), "-Binary"])
+                content = "\n\n".join(
+                    [
+                        f"Command: srec_cat {firmware_path} -Intel -o {binary_path} -Binary",
+                        _summarize("srec_cat -Intel -Binary", result),
+                    ]
+                )
+            else:
+                return ToolResult(
+                    content=(
+                        "HEX conversion requires objcopy or srec_cat, but neither is available on PATH.\n"
+                        "Install binutils (objcopy) or srecord (srec_cat), then rerun."
+                    ),
+                    metadata={"error": "missing_hex_converter", "path": str(firmware_path), "workspace_dir": str(workspace)},
+                )
+            md = {"path": str(firmware_path), "binary_path": str(binary_path), "workspace_dir": str(workspace)}
+            if result.get("code") != 0:
+                md["error"] = "conversion_failed"
+            return ToolResult(content=content, metadata=md)
+
+        content = f"Binary preparation skipped: format={detected}. Using original file as binary: {firmware_path}"
+        return ToolResult(
+            content=content,
+            metadata={"path": str(firmware_path), "binary_path": str(firmware_path), "workspace_dir": str(workspace), "detected_format": detected},
+        )
 
 
 class DiskUsageTriageTool(Tool):
@@ -1036,6 +1234,33 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
     registry.register_factory("secret_scanner", lambda: SecretScannerTool(name="secret_scanner"), overwrite=True)
     registry.register_factory(
         "weakness_profiler", lambda: WeaknessProfilerTool(name="weakness_profiler"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_directory_list", lambda: FirmwareDirectoryListTool(name="firmware_directory_list"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_entropy_check", lambda: FirmwareEntropyCheckTool(name="firmware_entropy_check"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_preflight", lambda: FirmwarePreflightTool(name="firmware_preflight"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_format_detector", lambda: FirmwareFormatDetectorTool(name="firmware_format_detector"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_prepare_binary", lambda: FirmwarePrepareBinaryTool(name="firmware_prepare_binary"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_extract", lambda: FirmwareExtractTool(name="firmware_extract"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_os_identifier", lambda: FirmwareOsIdentifierTool(name="firmware_os_identifier"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_hex_to_bin", lambda: FirmwareHexToBinTool(name="firmware_hex_to_bin"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_key_finder", lambda: FirmwareKeyFinderTool(name="firmware_key_finder"), overwrite=True
     )
     registry.register_factory(
         "disk_usage_triage", lambda: DiskUsageTriageTool(name="disk_usage_triage"), overwrite=True
