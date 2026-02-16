@@ -396,10 +396,23 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
   if not config_path.exists():
     raise HTTPException(status_code=400, detail=f"Config not found: {config_path}")
   resolved_path = str(config_path.resolve())
-  # If a run for the same config is already active, reuse it instead of starting a duplicate
+  # If a run for the same config is already active, reuse it instead of starting a duplicate.
+  # Treat "not completed but no live task" as stale and allow a new run.
   for existing_id, existing_state in RUNS.items():
-    if not existing_state.completed and existing_state.config_path == resolved_path:
+    if existing_state.config_path != resolved_path:
+      continue
+    active_task = existing_state.task is not None and not existing_state.task.done()
+    if active_task and not existing_state.completed:
       return {"run_id": existing_id, "project": existing_state.config.name, "already_running": True}
+    if not active_task and not existing_state.completed:
+      existing_state.completed = True
+      if RUN_STORE is not None:
+        RUN_STORE.update_run(
+            run_id=existing_id,
+            completed_tasks=existing_state.completed_tasks,
+            completed=True,
+            stop_requested=existing_state.stop_requested,
+        )
   config = ProjectConfig.from_file(str(config_path))
   run_id = str(uuid.uuid4())
   _ensure_run_dirs(run_id)
@@ -435,9 +448,27 @@ async def stop_run(run_id: str) -> Dict[str, Any]:
     if not state:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
     state.stop_requested = True
-    state.completed = True
+    # Unblock any pending human-gated task so execute_run can exit quickly.
+    if state.pending_input is not None:
+        state.pending_input.event.set()
+    if state.pending_approval is not None:
+        state.pending_approval.approved = False
+        state.pending_approval.event.set()
     if state.task and not state.task.done():
         state.task.cancel()
+    state.completed = True
+    stop_event = {
+        "type": "complete",
+        "results": {},
+        "duration": 0,
+        "stopped": True,
+    }
+    state.history.append(stop_event)
+    state.event_seq += 1
+    if RUN_STORE is not None:
+        RUN_STORE.append_event(run_id, state.event_seq, stop_event)
+    for queue in list(state.subscribers):
+        await queue.put(stop_event)
     if RUN_STORE is not None:
         RUN_STORE.update_run(
             run_id=run_id,
@@ -527,7 +558,6 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     state = RUNS[run_id]
     state.total_tasks = len(config.tasks)
     state.completed_tasks = 0
-    state.stop_requested = False
     tool_registry = ToolRegistry()
     register_builtin_tools(tool_registry)
     tool_registry.configure_from_specs(config.tool_specs)
@@ -1061,7 +1091,9 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     run_end = time.perf_counter()
     overall = run_end - run_start
 
-    await broadcast({"type": "complete", "results": results, "duration": overall, "stopped": stopped_early or state.stop_requested})
+    already_completed = bool(state.history and state.history[-1].get("type") == "complete")
+    if not already_completed:
+        await broadcast({"type": "complete", "results": results, "duration": overall, "stopped": stopped_early or state.stop_requested})
     state.completed = True
     persist_run()
 

@@ -414,6 +414,7 @@ class ArchitectureInferenceTool(Tool):
         reports: List[str] = []
         machine: str | None = None
         endian: str | None = None
+        source = "binutils"
 
         if _command_available("readelf"):
             result = _run_command(["readelf", "-h", str(firmware_path)])
@@ -425,24 +426,73 @@ class ArchitectureInferenceTool(Tool):
                 machine = machine_match.group(1).strip()
             if data_match:
                 endian = data_match.group(1).strip()
-        elif _command_available("objdump"):
+
+        # Fallback to objdump if readelf did not parse usable fields.
+        if (not machine or not endian) and _command_available("objdump"):
             result = _run_command(["objdump", "-f", str(firmware_path)])
             reports.append(_summarize("objdump -f", result))
             header_text = result.get("stdout", "")
             machine_match = re.search(r"architecture:\s*(\S+)", header_text)
             if machine_match:
                 machine = machine_match.group(1).strip()
-        else:
+                source = "objdump"
+            if not endian:
+                # objdump rarely provides direct endianness for raw blobs
+                endian = endian or None
+        elif not _command_available("readelf"):
             reports.append("Install binutils (readelf/objdump) to infer architecture directly.")
 
+        # Raw-binary heuristic for MCU firmware: vector table at file start.
+        if not machine or not endian:
+            try:
+                header = firmware_path.read_bytes()[:16]
+            except Exception:
+                header = b""
+            if len(header) >= 8:
+                sp_le = int.from_bytes(header[0:4], byteorder="little", signed=False)
+                rv_le = int.from_bytes(header[4:8], byteorder="little", signed=False)
+                sp_be = int.from_bytes(header[0:4], byteorder="big", signed=False)
+                rv_be = int.from_bytes(header[4:8], byteorder="big", signed=False)
+                reports.append(
+                    "Vector-table probe: "
+                    f"sp_le=0x{sp_le:08X} reset_le=0x{rv_le:08X} "
+                    f"sp_be=0x{sp_be:08X} reset_be=0x{rv_be:08X}"
+                )
+
+                # Common Cortex-M layout: stack in SRAM 0x2000xxxx and odd reset vector.
+                if 0x20000000 <= sp_le <= 0x20FFFFFF and (rv_le & 0x1) == 1:
+                    machine = machine or "ARM Cortex-M (heuristic vector table)"
+                    endian = endian or "Little endian (heuristic)"
+                    source = "vector_table_heuristic"
+                elif 0x20000000 <= sp_be <= 0x20FFFFFF and (rv_be & 0x1) == 1:
+                    machine = machine or "ARM Cortex-M (heuristic vector table)"
+                    endian = endian or "Big endian (heuristic)"
+                    source = "vector_table_heuristic"
+
         if _command_available("file"):
-            reports.append(_summarize("file", _run_command(["file", str(firmware_path)])))
+            file_result = _run_command(["file", str(firmware_path)])
+            reports.append(_summarize("file", file_result))
+            file_text = (file_result.get("stdout", "") + " " + file_result.get("stderr", "")).lower()
+            if not machine:
+                if "arm" in file_text:
+                    machine = "ARM (from file hint)"
+                    source = "file_hint"
+                elif "mips" in file_text:
+                    machine = "MIPS (from file hint)"
+                    source = "file_hint"
+                elif "x86-64" in file_text or "x86_64" in file_text:
+                    machine = "x86-64 (from file hint)"
+                    source = "file_hint"
 
         metadata = {"path": str(firmware_path)}
         if machine:
             metadata["machine"] = machine
         if endian:
             metadata["endianness"] = endian
+        metadata["detection_source"] = source
+        reports.append(f"Detected architecture: {machine or 'unknown'}")
+        reports.append(f"Detected endianness: {endian or 'unknown'}")
+        reports.append(f"Detection source: {source}")
         if not machine and not endian:
             reports.append("Could not parse architecture fields; inspect the outputs above.")
         return ToolResult(content="\n\n".join(reports), metadata=metadata)
@@ -928,12 +978,16 @@ class FirmwareGhidraHandoffTool(Tool):
             resolved = shutil.which(command)
             if resolved:
                 ghidra_bins[command] = resolved
-        for candidate in Path("/opt").glob("ghidra*/ghidraRun"):
-            if candidate.is_file():
-                ghidra_bins.setdefault("ghidraRun", str(candidate))
-        for candidate in Path("/opt").glob("ghidra*/support/analyzeHeadless"):
-            if candidate.is_file():
-                ghidra_bins.setdefault("analyzeHeadless", str(candidate))
+        # Avoid broad filesystem scans in this final step; use PATH plus an optional explicit ghidra_home.
+        ghidra_home_value = payload.get("ghidra_home")
+        if ghidra_home_value:
+            ghidra_home = Path(str(ghidra_home_value))
+            ghidra_run = ghidra_home / "ghidraRun"
+            analyze_headless = ghidra_home / "support" / "analyzeHeadless"
+            if ghidra_run.is_file():
+                ghidra_bins.setdefault("ghidraRun", str(ghidra_run))
+            if analyze_headless.is_file():
+                ghidra_bins.setdefault("analyzeHeadless", str(analyze_headless))
 
         ghidra_installed = bool(ghidra_bins)
         project_dir = Path(str(payload.get("project_dir") or binary_path.parent / "ghidra_project"))

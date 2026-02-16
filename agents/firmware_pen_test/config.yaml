@@ -3,8 +3,8 @@ description: Multi-phase agent orchestration for firmware reverse engineering an
 defaults:
   llm_provider: agx.llm.provider:OllamaProvider
   llm_params:
-    model: gpt-oss
-    host: http://localhost:11434
+    model: llama3.2
+    host: http://ineicp-corp-114.emrsn.org:11434
 
 agents:
   firmware_agent:
@@ -14,6 +14,7 @@ agents:
       - firmware_format_detector
       - firmware_prepare_binary
       - firmware_directory_list
+      - architecture_inference
       - firmware_entropy_check
       - firmware_extract
       - firmware_os_identifier
@@ -89,44 +90,54 @@ tasks:
       workspace_dir: "{{results.00-preflight.workspace_dir}}"
       binary_path: "{{results.00-preflight.workspace_dir}}/prepared.bin"
 
-  - id: 03-entropy-check
+  - id: 03-architecture-detect
+    type: tool_run
+    tool: architecture_inference
+    agent: firmware_agent
+    description: Detect CPU architecture and endianness from prepared binary.
+    depends_on: [02-prepare-binary]
+    input:
+      path: "{{results.02-prepare-binary.binary_path}}"
+      timeout: 180
+
+  - id: 04-entropy-check
     type: tool_run
     tool: firmware_entropy_check
     agent: firmware_agent
     description: Check entropy on prepared binary artifact.
-    depends_on: [02-prepare-binary]
+    depends_on: [03-architecture-detect]
     input:
       path: "{{results.02-prepare-binary.binary_path}}"
       timeout: 300
 
-  - id: 04-extract-firmware
+  - id: 05-extract-firmware
     type: tool_run
     tool: firmware_extract
     agent: firmware_agent
     description: Extract firmware in isolated workspace using binwalk.
-    depends_on: [03-entropy-check]
+    depends_on: [04-entropy-check]
     input:
       path: "{{inputs.firmware-intake.firmware_path}}"
       output_dir: "{{results.00-preflight.workspace_dir}}/extract"
       timeout: 300
 
-  - id: 05-fw-ident
+  - id: 06-fw-ident
     type: tool_run
     tool: firmware_os_identifier
     agent: firmware_agent
     description: Check OS family and ARM magic heuristic on prepared binary.
-    depends_on: [04-extract-firmware]
+    depends_on: [05-extract-firmware]
     input:
       path: "{{inputs.firmware-intake.firmware_path}}"
       extracted_path: "{{results.02-prepare-binary.binary_path}}"
       timeout: 180
 
-  - id: 06-find-key
+  - id: 07-find-key
     type: tool_run
     tool: firmware_key_finder
     agent: firmware_agent
     description: Run strings and key discovery on prepared binary.
-    depends_on: [05-fw-ident]
+    depends_on: [06-fw-ident]
     input:
       path: "{{results.02-prepare-binary.binary_path}}"
       output_txt: "{{results.00-preflight.workspace_dir}}/save.txt"
@@ -138,14 +149,15 @@ tasks:
     tool: firmware_ghidra_handoff
     agent: firmware_agent
     description: Produce analyst handoff checklist for opening firmware binary in Ghidra.
-    depends_on: [06-find-key]
+    depends_on: [07-find-key]
     input:
       binary_path: "{{results.02-prepare-binary.binary_path}}"
-      strings_txt: "{{results.06-find-key.output_txt}}"
+      strings_txt: "{{results.07-find-key.output_txt}}"
       project_dir: "{{results.00-preflight.workspace_dir}}/ghidra_project"
       project_name: firmware_review
       findings:
         - Entropy profile reviewed
+        - Architecture step completed
         - OS and ARM magic heuristic checked
         - strings output and key hits saved to save.txt
         - Prepared binary ready for reverse engineering
@@ -159,6 +171,8 @@ tools:
     type: agx.tools.builtin:FirmwarePrepareBinaryTool
   firmware_directory_list:
     type: agx.tools.builtin:FirmwareDirectoryListTool
+  architecture_inference:
+    type: agx.tools.builtin:ArchitectureInferenceTool
   firmware_entropy_check:
     type: agx.tools.builtin:FirmwareEntropyCheckTool
   firmware_extract:
