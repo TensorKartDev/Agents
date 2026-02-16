@@ -106,8 +106,10 @@ tasks:
     agent: firmware_agent
     description: Check entropy on prepared binary artifact.
     depends_on: [03-architecture-detect]
+    continue_on_error: true
     input:
       path: "{{results.02-prepare-binary.binary_path}}"
+      workspace_dir: "{{results.00-preflight.workspace_dir}}"
       timeout: 300
 
   - id: 05-extract-firmware

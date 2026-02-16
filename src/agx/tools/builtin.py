@@ -751,11 +751,16 @@ class FirmwareEntropyCheckTool(Tool):
 
         reports: List[str] = []
         timeout = int(payload.get("timeout", 300))
+        run_id = str(context.metadata.get("run_id", "")).strip() or "local"
+        workspace = Path(str(payload.get("workspace_dir") or f"/tmp/agx_run_{run_id}"))
+        entropy_dir = workspace / "entropy"
+        entropy_dir.mkdir(parents=True, exist_ok=True)
+        reports.append(f"Entropy workspace: {entropy_dir}")
         found_any = False
         if _command_available("ent"):
             found_any = True
             reports.append(f"Command: ent {firmware_path}")
-            reports.append(_summarize("ent", _run_command(["ent", str(firmware_path)], timeout=timeout)))
+            reports.append(_summarize("ent", _run_command(["ent", str(firmware_path)], timeout=timeout, cwd=entropy_dir)))
         else:
             reports.append("Command unavailable: ent")
         if _command_available("binwalk"):
@@ -764,15 +769,37 @@ class FirmwareEntropyCheckTool(Tool):
             reports.append(
                 _summarize(
                     "binwalk --entropy",
-                    _run_command(["binwalk", "--entropy", str(firmware_path)], timeout=timeout),
+                    _run_command(["binwalk", "--entropy", str(firmware_path)], timeout=timeout, cwd=entropy_dir),
                 )
             )
         else:
             reports.append("Command unavailable: binwalk")
-        if not found_any:
-            return ToolResult(content="\n\n".join(reports), metadata={"error": "missing_entropy_tool", "path": str(firmware_path)})
 
-        return ToolResult(content="\n\n".join(reports), metadata={"path": str(firmware_path)})
+        generated_artifacts = sorted(
+            str(path)
+            for path in entropy_dir.glob("*")
+            if path.is_file() and path.suffix.lower() in {".png", ".svg", ".jpg", ".jpeg", ".csv", ".txt", ".log"}
+        )
+        if generated_artifacts:
+            reports.append("Entropy artifacts:")
+            reports.extend(f"- {artifact}" for artifact in generated_artifacts)
+        elif not found_any:
+            reports.append("No entropy tools available. Continuing workflow without entropy artifacts.")
+
+        report_path = entropy_dir / "entropy_report.txt"
+        report_path.write_text("\n\n".join(reports), encoding="utf-8", errors="ignore")
+        reports.append(f"Saved entropy report: {report_path}")
+
+        metadata: Dict[str, str] = {
+            "path": str(firmware_path),
+            "workspace_dir": str(workspace),
+            "entropy_dir": str(entropy_dir),
+            "entropy_report": str(report_path),
+            "entropy_tools_available": str(found_any).lower(),
+        }
+        if generated_artifacts:
+            metadata["entropy_artifacts"] = ",".join(generated_artifacts)
+        return ToolResult(content="\n\n".join(reports), metadata=metadata)
 
 
 class FirmwareExtractTool(Tool):
