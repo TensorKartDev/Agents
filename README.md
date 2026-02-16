@@ -202,14 +202,9 @@ The CLI resolves the YAML, registers tools, builds agents, and runs the orchestr
 - Plug in vector memories, graph planners, streaming observers, etc.
 - Deploy via containers and customise configs for your environment.
 
-### Domain-specific scenarios
+### Domain scenario
 
-- **Hardware penetration testing** – reuse `nmap_scan` and `firmware_diff` while adding tools that speak to lab equipment or artifact stores.
-- **Sales order investigations** – extend `order_lookup` to query your CRM/ERP and feed structured events into `anomaly_scoring`.
-- **Edge/on-board inference** – pair `edge_deployment_planner` with telemetry tools that ingest device stats or OTA reports.
-- **Firmware reverse engineering / penetration workflows** – the `firmware_workflow.yaml` config demonstrates the step-by-step diagram provided by the cyber security team (intake, magic-byte detection, carving, Ghidra handoff, secret hunting, weakness profiling, and verification planning). Extend the built-in firmware tools to integrate real decompression, Binwalk runs, or Azure DevOps reporting scripts.
-
-Each scenario boils down to adding new tool factories and swapping configs, so you can keep a single orchestration core across very different domains.
+- **Firmware reverse engineering / penetration workflows** – `agents/firmware_pen_test/config.yaml` implements the step-by-step flow used by the cyber security team (intake, format detection, architecture detection, entropy checks, extraction, OS/magic checks, key discovery, and Ghidra handoff). Extend the built-in firmware tools to integrate real decompression, Binwalk runs, or reporting scripts.
 
 ### Firmware tooling integrations (real tools)
 
@@ -220,7 +215,7 @@ The firmware workflow now executes real binaries instead of mocked responses. Th
    - Debian/Ubuntu: `sudo apt-get update && sudo apt-get install -y binwalk ripgrep binutils file`
    - Fedora/RHEL: `sudo dnf install binwalk ripgrep binutils file`
    - Windows: use WSL with the Debian commands above or install the packages via winget/chocolatey where available.
-2. Update `examples/configs/firmware_workflow.yaml` to point each task’s `path` at your firmware image (replace `/path/to/firmware.bin`).
+2. Update `agents/firmware_pen_test/config.yaml` input mappings to point at your firmware image paths.
 3. Set `extract: true` where you want Binwalk carving and adjust `output_dir` to control where artifacts are written.
 
 Outputs include real stdout/stderr from the commands. If a dependency is missing or the path is invalid, the tool surfaces the error instead of fabricating a result.
@@ -230,13 +225,13 @@ Outputs include real stdout/stderr from the commands. If a dependency is missing
 By default `agx run` executes tasks through the Microsoft Agent Framework (Autogen) and calls your Ollama models as the LLM backend. The YAML-defined tools are registered as Autogen functions, so the planner automatically decides when to invoke them. Force an engine explicitly with:
 
 ```bash
-agx run examples/configs/hardware_pen_test.yaml --engine autogen
+agx run agents/firmware_pen_test/config.yaml --engine autogen
 ```
 
 Switch back to the legacy JSON-contract planner (useful for debugging prompt issues or collecting per-iteration traces) via:
 
 ```bash
-agx run examples/configs/hardware_pen_test.yaml --engine legacy --show-trace
+agx run agents/firmware_pen_test/config.yaml --engine legacy --show-trace
 ```
 
 Both engines consume the same configs; the Autogen engine aligns with Microsoft’s latest agent framework guidance.

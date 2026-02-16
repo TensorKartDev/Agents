@@ -10,20 +10,19 @@ pip install --upgrade pip
 pip install -e .
 ```
 
-## Run an example scenario
+## Run firmware penetration workflow
 
 ```bash
-agx run examples/configs/hardware_pen_test.yaml
+agx run agents/firmware_pen_test/config.yaml --engine autogen
 ```
 
-Replace the config path with `sales_order_investigation.yaml` or `edge_inference.yaml` for the other domains.
-For the firmware penetration workflow delivered by the security team use:
+For trace-heavy debugging:
 
 ```bash
-agx run examples/configs/firmware_workflow.yaml --show-trace
+agx run agents/firmware_pen_test/config.yaml --engine legacy --show-trace
 ```
 
-Each turn follows the JSON contract shown below so the agent can invoke tools such as `firmware_intake`, `firmware_format_identifier`, and `weakness_profiler` that encode the team’s process. The CLI defaults to the Microsoft Autogen/MAF engine, which drives Ollama-hosted models. Pass `--engine legacy` if you need the original in-house loop.
+The workflow invokes firmware-focused tools (preflight, format detection, architecture inference, entropy checks, extraction, OS/magic checks, key discovery, and Ghidra handoff). The CLI defaults to the Autogen engine; use `--engine legacy` if needed.
 
 ## Configure Postgres run store
 

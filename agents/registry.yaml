@@ -1,6 +1,2 @@
 agents:
-  - disk_triage_agent
   - firmware_pen_test
-  - hardware_pen_test
-  - edge_inference
-  - sales_order_investigation
