@@ -895,6 +895,104 @@ class FirmwareKeyFinderTool(Tool):
         return ToolResult(content=content, metadata={"path": str(firmware_path), "output_txt": str(out_path), "hits": str(len(hits)), "grep_term": grep_term})
 
 
+class FirmwareGhidraHandoffTool(Tool):
+    """Produces a concrete analyst handoff for loading firmware in Ghidra."""
+
+    def run(self, *, input_text: str, context: ToolContext) -> ToolResult:
+        payload = _load_structured(input_text) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        binary_value = payload.get("binary_path") or payload.get("path")
+        if not binary_value:
+            return ToolResult(
+                content="Provide binary_path (or path) for Ghidra handoff.",
+                metadata={"error": "missing_path"},
+            )
+        binary_path = Path(str(binary_value))
+        validation_error = _validate_path(binary_path)
+        if validation_error:
+            return ToolResult(content=validation_error, metadata={"error": "missing_file"})
+
+        strings_value = payload.get("strings_txt") or payload.get("output_txt") or payload.get("save_txt")
+        strings_path = Path(str(strings_value)) if strings_value else None
+        strings_ready = bool(strings_path and strings_path.exists() and strings_path.is_file())
+
+        findings = payload.get("findings") or []
+        if not isinstance(findings, list):
+            findings = [str(findings)]
+        findings = [str(item) for item in findings if str(item).strip()]
+
+        ghidra_bins: Dict[str, str] = {}
+        for command in ("ghidra", "ghidraRun", "analyzeHeadless"):
+            resolved = shutil.which(command)
+            if resolved:
+                ghidra_bins[command] = resolved
+        for candidate in Path("/opt").glob("ghidra*/ghidraRun"):
+            if candidate.is_file():
+                ghidra_bins.setdefault("ghidraRun", str(candidate))
+        for candidate in Path("/opt").glob("ghidra*/support/analyzeHeadless"):
+            if candidate.is_file():
+                ghidra_bins.setdefault("analyzeHeadless", str(candidate))
+
+        ghidra_installed = bool(ghidra_bins)
+        project_dir = Path(str(payload.get("project_dir") or binary_path.parent / "ghidra_project"))
+        project_name = str(payload.get("project_name") or f"{binary_path.stem}_analysis")
+
+        lines: List[str] = []
+        lines.append(f"Binary ready for import: {binary_path}")
+        lines.append(f"strings artifact: {strings_path if strings_ready else 'not found'}")
+        if findings:
+            lines.append("Prior findings:")
+            for finding in findings:
+                lines.append(f"- {finding}")
+
+        if ghidra_installed:
+            lines.append("Ghidra install: detected")
+            for name in ("ghidra", "ghidraRun", "analyzeHeadless"):
+                if name in ghidra_bins:
+                    lines.append(f"- {name}: {ghidra_bins[name]}")
+        else:
+            lines.append("Ghidra install: not detected on PATH or /opt/ghidra*")
+
+        lines.append("Analyst handoff checklist:")
+        lines.append(f"1. Create/choose project directory: {project_dir}")
+        lines.append(f"2. Create project name: {project_name}")
+        lines.append(f"3. Import binary: {binary_path}")
+        lines.append("4. In import options, verify architecture/endianness against earlier OS/magic findings.")
+        lines.append("5. Run initial auto-analysis and review entry point/vector table.")
+        if strings_ready and strings_path:
+            lines.append(f"6. Correlate key-hit strings from: {strings_path}")
+        else:
+            lines.append("6. Re-run strings/key search inside Ghidra as needed (no save.txt provided).")
+
+        if "ghidraRun" in ghidra_bins:
+            lines.append(
+                f"Launch command: {ghidra_bins['ghidraRun']} {project_dir} {project_name} -import {binary_path} -overwrite"
+            )
+        elif "ghidra" in ghidra_bins:
+            lines.append(f"Launch command: {ghidra_bins['ghidra']}  # then import {binary_path}")
+        else:
+            lines.append("Launch command: unavailable (install Ghidra, then import the binary manually).")
+
+        if "analyzeHeadless" in ghidra_bins:
+            lines.append(
+                f"Headless template: {ghidra_bins['analyzeHeadless']} {project_dir} {project_name} -import {binary_path} -overwrite -analysisTimeoutPerFile 600"
+            )
+
+        metadata: Dict[str, str] = {
+            "binary_path": str(binary_path),
+            "project_dir": str(project_dir),
+            "project_name": project_name,
+            "ghidra_installed": str(ghidra_installed).lower(),
+        }
+        if strings_ready and strings_path:
+            metadata["strings_txt"] = str(strings_path)
+        for name, resolved in ghidra_bins.items():
+            metadata[f"{name}_path"] = resolved
+        return ToolResult(content="\n".join(lines), metadata=metadata)
+
+
 class FirmwarePreflightTool(Tool):
     """Preflight checks: dependencies, path validity, and isolated workspace creation."""
 
@@ -1261,6 +1359,9 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
     )
     registry.register_factory(
         "firmware_key_finder", lambda: FirmwareKeyFinderTool(name="firmware_key_finder"), overwrite=True
+    )
+    registry.register_factory(
+        "firmware_ghidra_handoff", lambda: FirmwareGhidraHandoffTool(name="firmware_ghidra_handoff"), overwrite=True
     )
     registry.register_factory(
         "disk_usage_triage", lambda: DiskUsageTriageTool(name="disk_usage_triage"), overwrite=True

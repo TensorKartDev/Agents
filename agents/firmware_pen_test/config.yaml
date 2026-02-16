@@ -3,7 +3,7 @@ description: Multi-phase agent orchestration for firmware reverse engineering an
 defaults:
   llm_provider: agx.llm.provider:OllamaProvider
   llm_params:
-    model: llama3.2
+    model: gpt-oss
     host: http://localhost:11434
 
 agents:
@@ -134,10 +134,16 @@ tasks:
       grep_term: Key
 
   - id: ghidra-handoff
+    type: tool_run
+    tool: firmware_ghidra_handoff
     agent: firmware_agent
     description: Produce analyst handoff checklist for opening firmware binary in Ghidra.
     depends_on: [06-find-key]
     input:
+      binary_path: "{{results.02-prepare-binary.binary_path}}"
+      strings_txt: "{{results.06-find-key.output_txt}}"
+      project_dir: "{{results.00-preflight.workspace_dir}}/ghidra_project"
+      project_name: firmware_review
       findings:
         - Entropy profile reviewed
         - OS and ARM magic heuristic checked
@@ -161,5 +167,7 @@ tools:
     type: agx.tools.builtin:FirmwareOsIdentifierTool
   firmware_key_finder:
     type: agx.tools.builtin:FirmwareKeyFinderTool
+  firmware_ghidra_handoff:
+    type: agx.tools.builtin:FirmwareGhidraHandoffTool
   verification_planner:
     type: agx.tools.builtin:VerificationPlannerTool
