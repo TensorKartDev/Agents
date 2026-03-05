@@ -111,8 +111,8 @@ if STATIC_IMG.exists():
 @app.on_event("startup")
 async def init_run_store() -> None:
     global RUN_STORE
-    #db_url = os.getenv("AGX_DB_URL", "").strip()
-    db_url = "dbname=agx user=postgres password=postgres host=localhost port=5432"
+    db_url = os.getenv("AGX_DB_URL", "").strip()
+    #db_url = "dbname=agx user=admin password= host=localhost port=5432"
 
     print(db_url, "DB")
     if not db_url:

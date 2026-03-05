@@ -30,3 +30,4 @@ meta/
 artifacts/*
 extractions/*   
 *.hex.png
+.env
