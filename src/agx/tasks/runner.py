@@ -7,8 +7,10 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
+from ..runtime.integrations import RuntimeIntegrations, build_runtime_integrations
+from ..runtime.interoperability import build_handoff_payload, parse_output_text, resolve_bindings
 from .base import HumanApprovalTask, HumanInputTask, Task, TaskResult, TaskState
 
 
@@ -138,6 +140,7 @@ class TaskRunner:
         agent_resolver: Callable[[str], object],
         db_path: Optional[Path] = None,
         approval_callback: Optional[Callable[[HumanApprovalTask], Optional[bool]]] = None,
+        integrations: Optional[RuntimeIntegrations] = None,
     ):
         self._resolver = agent_resolver
         self._results: Dict[str, TaskResult] = {}
@@ -145,6 +148,7 @@ class TaskRunner:
             db_path if db_path is not None else Path(".agx") / "task_state.db"
         )
         self._approval_callback = approval_callback
+        self._integrations = integrations or build_runtime_integrations()
 
     def approve(self, task_id: str, approved: bool, reason: Optional[str] = None) -> None:
         self._store.set_approval(task_id, approved, reason=reason)
@@ -301,7 +305,17 @@ class TaskRunner:
         return result
 
     def run_all(self, tasks: Iterable[Task]) -> Dict[str, TaskResult]:
+        task_list = list(tasks)
+        with self._integrations.telemetry.span(
+            "agx.legacy.run_all",
+            attributes={"tasks.count": len(task_list)},
+        ):
+            return self._run_all_impl(task_list)
+
+    def _run_all_impl(self, tasks: Iterable[Task]) -> Dict[str, TaskResult]:
         task_map = {task.id: task for task in tasks}
+        input_store: Dict[str, Dict[str, Any]] = {}
+        result_store: Dict[str, Dict[str, Any]] = {}
         for task in task_map.values():
             for dep in task.depends_on or []:
                 if dep not in task_map:
@@ -356,9 +370,35 @@ class TaskRunner:
 
             for task_id in ready:
                 task = task_map[task_id]
+                if not self._prepare_task(task, input_store=input_store, result_store=result_store):
+                    remaining.remove(task_id)
+                    task_state = self._results[task_id].state or TaskState.FAILED
+                    states[task_id] = task_state
+                    self._integrations.emit(
+                        {
+                            "type": "task_state",
+                            "engine": "legacy",
+                            "task_id": task_id,
+                            "state": task_state.value,
+                        }
+                    )
+                    continue
                 self.run(task)
                 remaining.remove(task_id)
                 states[task_id] = self._results[task_id].state
+                self._integrations.emit(
+                    {
+                        "type": "task_state",
+                        "engine": "legacy",
+                        "task_id": task_id,
+                        "state": states[task_id].value if states[task_id] else TaskState.FAILED.value,
+                    }
+                )
+                result = self._results[task_id]
+                parsed = parse_output_text(result.output)
+                result_store[task_id] = {"output": result.output, "parsed_output": parsed}
+                if isinstance(task, HumanInputTask) and isinstance(parsed, dict):
+                    input_store[task_id] = parsed
                 if states[task_id] == TaskState.WAITING_HUMAN:
                     # Stop further processing until approval.
                     return dict(self._results)
@@ -366,3 +406,59 @@ class TaskRunner:
 
     def results(self) -> Dict[str, TaskResult]:
         return dict(self._results)
+
+    def _prepare_task(
+        self,
+        task: Task,
+        *,
+        input_store: Dict[str, Dict[str, Any]],
+        result_store: Dict[str, Dict[str, Any]],
+    ) -> bool:
+        task.input = resolve_bindings(task.input, input_store=input_store, result_store=result_store)
+        task.context = resolve_bindings(task.context, input_store=input_store, result_store=result_store)
+        if task.task_type != "agent_handoff":
+            return True
+
+        source_task = task.source_task or (task.depends_on[0] if task.depends_on else "")
+        if not source_task:
+            self._results[task.id] = TaskResult(
+                task=task,
+                success=False,
+                output="agent_handoff task requires source_task or depends_on",
+                iterations=0,
+                trace=[],
+                state=TaskState.FAILED,
+            )
+            self._store.upsert(
+                TaskStateRecord(
+                    task_id=task.id,
+                    state=TaskState.FAILED,
+                    output=self._results[task.id].output,
+                )
+            )
+            return False
+
+        handoff = build_handoff_payload(
+            source_task=source_task,
+            result_store=result_store,
+            target_agent=task.agent_name,
+        )
+        task.input = handoff
+        output = json.dumps(handoff)
+        self._results[task.id] = TaskResult(
+            task=task,
+            success=True,
+            output=output,
+            iterations=0,
+            trace=["agent_handoff completed"],
+            state=TaskState.COMPLETED,
+        )
+        self._store.upsert(
+            TaskStateRecord(
+                task_id=task.id,
+                state=TaskState.COMPLETED,
+                output=output,
+            )
+        )
+        result_store[task.id] = {"output": output, "parsed_output": handoff}
+        return False

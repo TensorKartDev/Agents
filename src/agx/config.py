@@ -124,6 +124,8 @@ class TaskSpec:
                 task_type = "tool_run"
             elif normalized in {"action_approval", "action-approval", "actions_approval", "approve_actions"}:
                 task_type = "action_approval"
+            elif normalized in {"agent_handoff", "agent-handoff", "handoff"}:
+                task_type = "agent_handoff"
         else:
             task_type = None
         return cls(
@@ -164,6 +166,8 @@ class DefaultsSpec:
 
     llm_provider: Optional[str] = None
     llm_params: Dict[str, Any] = field(default_factory=dict)
+    middleware: Dict[str, Any] = field(default_factory=dict)
+    observability: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, data: Optional[Mapping[str, Any]]) -> "DefaultsSpec":
@@ -172,6 +176,8 @@ class DefaultsSpec:
         return cls(
             llm_provider=data.get("llm_provider"),
             llm_params=dict(data.get("llm_params", {})),
+            middleware=dict(data.get("middleware", {})),
+            observability=dict(data.get("observability", {})),
         )
 
 

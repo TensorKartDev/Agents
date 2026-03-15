@@ -28,6 +28,10 @@ class Task:
     context: Dict[str, Any] = field(default_factory=dict)
     expected_output: Optional[str] = None
     depends_on: list[str] = field(default_factory=list)
+    task_type: Optional[str] = None
+    source_task: Optional[str] = None
+    tool: Optional[str] = None
+    continue_on_error: bool = False
 
 
 @dataclass

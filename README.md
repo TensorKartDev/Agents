@@ -167,6 +167,14 @@ defaults:
     host: http://127.0.0.1:11434
     options:
       temperature: 0.1
+  middleware:
+    rabbitmq_enabled: true
+    rabbitmq_url: amqp://guest:guest@localhost:5672/%2F
+    rabbitmq_exchange: agx.events
+    rabbitmq_routing_prefix: agx
+  observability:
+    enabled: true
+    service_name: agx-framework
 ```
 
 Per-agent overrides are supported via `llm_params` blocks inside each agent. The provider automatically sets `stream=false` and surfaces any HTTP/API errors so the orchestrator can stop gracefully.
@@ -193,6 +201,28 @@ agents:
 - **tasks** describe what needs to be achieved.
 - **agents** define capabilities, linked tools, and planning constraints.
 - **tools** (optional) provide additional custom configuration per tool instance.
+- **defaults.middleware** enables RabbitMQ event publication for run/task/tool events.
+- **defaults.observability** enables OpenTelemetry spans/events.
+
+### Cross-agent interoperability
+
+Use binding tokens to pass data between tasks:
+
+```yaml
+input:
+  previous_summary: "{{results.recon.output}}"
+  selected_path: "{{inputs.intake.target_path}}"
+```
+
+Use `type: agent_handoff` to create an explicit structured handoff payload between agents:
+
+```yaml
+- id: handoff_to_analyst
+  type: agent_handoff
+  agent: analyst_agent
+  source_task: recon
+  description: "Pass recon findings to analyst agent"
+```
 
 The CLI resolves the YAML, registers tools, builds agents, and runs the orchestrator.
 

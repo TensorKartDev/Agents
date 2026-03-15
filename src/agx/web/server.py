@@ -28,6 +28,8 @@ from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
 from ..persistence import PostgresRunStore
+from ..runtime.integrations import build_runtime_integrations
+from ..runtime.interoperability import build_handoff_payload, parse_output_text, resolve_bindings
 from dotenv import load_dotenv
 load_dotenv()
 def _load_structured(text: Any) -> Any:
@@ -558,6 +560,12 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     state = RUNS[run_id]
     state.total_tasks = len(config.tasks)
     state.completed_tasks = 0
+    integrations = build_runtime_integrations(
+        {
+            "middleware": config.defaults.middleware,
+            "observability": config.defaults.observability,
+        }
+    )
     tool_registry = ToolRegistry()
     register_builtin_tools(tool_registry)
     tool_registry.configure_from_specs(config.tool_specs)
@@ -565,12 +573,17 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     result_store: Dict[str, Dict[str, Any]] = {}
 
     async def broadcast(event: Dict[str, Any]) -> None:
-        state.history.append(event)
+        envelope = dict(event)
+        envelope.setdefault("run_id", run_id)
+        envelope.setdefault("project", config.name)
+        envelope.setdefault("engine", engine)
+        state.history.append(envelope)
         state.event_seq += 1
+        integrations.emit(envelope)
         if RUN_STORE is not None:
-            RUN_STORE.append_event(run_id, state.event_seq, event)
+            RUN_STORE.append_event(run_id, state.event_seq, envelope)
         for queue in list(state.subscribers):
-            await queue.put(event)
+            await queue.put(envelope)
 
     def persist_run() -> None:
         if RUN_STORE is None:
@@ -600,40 +613,20 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
     stopped_early = False
 
     if engine == "legacy":
-        orchestrator = Orchestrator(config)
+        orchestrator = Orchestrator(config, integrations=integrations)
         task_lookup = {task.id: task for task in orchestrator.tasks}
 
         def run_single(task_spec):
             task_obj = task_lookup[task_spec.id]
+            task_obj.input = task_spec.input
+            task_obj.context = task_spec.context
             return orchestrator.runner.run(task_obj).output
 
     else:
-        orchestrator = AutogenOrchestrator(config)
+        orchestrator = AutogenOrchestrator(config, integrations=integrations)
 
         def run_single(task_spec):
             return orchestrator.run_task(task_spec)
-
-    def resolve_input(value: Any) -> Any:
-        if value is None:
-            return value
-        if isinstance(value, dict):
-            return {k: resolve_input(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [resolve_input(v) for v in value]
-        if isinstance(value, str):
-            out = value
-            for task_id, fields in input_store.items():
-                for key, val in fields.items():
-                    token = f"{{{{inputs.{task_id}.{key}}}}}"
-                    if token in out:
-                        out = out.replace(token, str(val))
-            for task_id, fields in result_store.items():
-                for key, val in fields.items():
-                    token = f"{{{{results.{task_id}.{key}}}}}"
-                    if token in out:
-                        out = out.replace(token, str(val))
-            return out
-        return value
 
     for spec in task_specs:
       await broadcast({"type": "status", "task_id": spec.id, "status": "pending"})
@@ -644,7 +637,37 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           stopped_early = True
           break
 
+        spec.input = resolve_bindings(spec.input, input_store=input_store, result_store=result_store)
+        spec.context = resolve_bindings(spec.context, input_store=input_store, result_store=result_store)
+
         task_type = getattr(spec, "task_type", None)
+        if task_type == "agent_handoff":
+          source_task = getattr(spec, "source_task", None) or (spec.depends_on[0] if getattr(spec, "depends_on", None) else "")
+          if not source_task:
+            await broadcast({"type": "error", "message": f"Agent handoff task {spec.id} missing source_task"})
+            stopped_early = True
+            break
+          handoff = build_handoff_payload(
+            source_task=source_task,
+            result_store=result_store,
+            target_agent=getattr(spec, "agent", None),
+          )
+          output = json.dumps(handoff, indent=2)
+          result_store[spec.id] = {"output": output, "duration": 0, "handoff": handoff}
+          results[spec.id] = result_store[spec.id]
+          state.completed_tasks += 1
+          persist_run()
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "completed",
+              "output": output,
+              "duration": 0,
+            }
+          )
+          continue
+
         if task_type == "human_input":
           wait_msg = "WAITING_INPUT"
           state.pending_input = PendingInput(task_id=spec.id, spec=spec)
@@ -674,7 +697,12 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           input_store[spec.id] = dict(payload)
           output = json.dumps(payload)
           duration = 0
-          result_store[spec.id] = {"output": output, "duration": duration, "input": payload}
+          result_store[spec.id] = {
+            "output": output,
+            "duration": duration,
+            "input": payload,
+            "parsed_output": payload,
+          }
           results[spec.id] = result_store[spec.id]
           state.completed_tasks += 1
           persist_run()
@@ -718,7 +746,12 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           approved = bool(state.pending_approval.approved)
           output = "Approved" if approved else "Rejected"
           duration = 0
-          result_store[spec.id] = {"output": output, "duration": duration, "approved": approved}
+          result_store[spec.id] = {
+            "output": output,
+            "duration": duration,
+            "approved": approved,
+            "parsed_output": approved,
+          }
           results[spec.id] = result_store[spec.id]
           if approved:
             state.completed_tasks += 1
@@ -831,7 +864,12 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
               approvals.append(action)
           output = json.dumps({"approved_actions": approvals}, indent=2)
           duration = 0
-          result_store[spec.id] = {"output": output, "duration": duration, "approved_actions": approvals}
+          result_store[spec.id] = {
+            "output": output,
+            "duration": duration,
+            "approved_actions": approvals,
+            "parsed_output": {"approved_actions": approvals},
+          }
           results[spec.id] = result_store[spec.id]
           state.completed_tasks += 1
           persist_run()
@@ -861,7 +899,11 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
             break
           await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})
           t0 = time.perf_counter()
-          resolved_input = resolve_input(getattr(spec, "input", None))
+          resolved_input = resolve_bindings(
+            getattr(spec, "input", None),
+            input_store=input_store,
+            result_store=result_store,
+          )
           if isinstance(resolved_input, (dict, list)):
             input_text = json.dumps(resolved_input)
           elif resolved_input is None:
@@ -1017,6 +1059,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
           t1 = time.perf_counter()
           duration = t1 - t0
           item: Dict[str, Any] = {"output": output, "duration": duration}
+          item["parsed_output"] = parse_output_text(output)
           if isinstance(tool_metadata, dict):
             item["metadata"] = tool_metadata
             for k, v in tool_metadata.items():
@@ -1054,13 +1097,17 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         await broadcast({"type": "status", "task_id": spec.id, "status": "thinking"})
         t0 = time.perf_counter()
         if getattr(spec, "input", None) is not None:
-          spec.input = resolve_input(spec.input)
+          spec.input = resolve_bindings(spec.input, input_store=input_store, result_store=result_store)
         output, captured = await asyncio.to_thread(_run_with_capture, run_single, spec)
         if captured and engine != "autogen":
           await broadcast({"type": "console", "message": captured})
         t1 = time.perf_counter()
         duration = t1 - t0
-        result_store[spec.id] = {"output": output, "duration": duration}
+        result_store[spec.id] = {
+          "output": output,
+          "duration": duration,
+          "parsed_output": parse_output_text(output),
+        }
         results[spec.id] = result_store[spec.id]
         state.completed_tasks += 1
         persist_run()
@@ -1096,6 +1143,7 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
         await broadcast({"type": "complete", "results": results, "duration": overall, "stopped": stopped_early or state.stop_requested})
     state.completed = True
     persist_run()
+    integrations.close()
 
 
 @app.websocket("/ws/{run_id}")

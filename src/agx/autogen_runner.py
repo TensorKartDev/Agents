@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from autogen import AssistantAgent, UserProxyAgent
 
 from .config import AgentSpec, ProjectConfig
-from .tasks.runner import TaskRunner, TaskStateRecord, TaskStateStore
+from .runtime.integrations import RuntimeIntegrations, build_runtime_integrations
+from .runtime.interoperability import build_handoff_payload, parse_output_text, resolve_bindings
 from .tasks.base import TaskState
+from .tasks.runner import TaskRunner, TaskStateRecord, TaskStateStore
 from .tools.base import ToolContext
 from .tools.builtin import register_builtin_tools
 from .tools.registry import ToolRegistry
@@ -20,8 +22,19 @@ from .tools.registry import ToolRegistry
 class AutogenOrchestrator:
     """Runs project tasks using Microsoft Autogen agents backed by Ollama."""
 
-    def __init__(self, project_config: ProjectConfig, approval_callback=None) -> None:
+    def __init__(
+        self,
+        project_config: ProjectConfig,
+        approval_callback=None,
+        integrations: Optional[RuntimeIntegrations] = None,
+    ) -> None:
         self.config = project_config
+        self.integrations = integrations or build_runtime_integrations(
+            {
+                "middleware": self.config.defaults.middleware,
+                "observability": self.config.defaults.observability,
+            }
+        )
         self.tool_registry = ToolRegistry()
         register_builtin_tools(self.tool_registry)
         self.tool_registry.configure_from_specs(self.config.tool_specs)
@@ -31,112 +44,256 @@ class AutogenOrchestrator:
     def run(self) -> Dict[str, str]:
         outputs: Dict[str, str] = {}
         ordered = TaskRunner.order_tasks(self.config.tasks)
-        for task_spec in ordered:
-            self._store.upsert(TaskStateRecord(task_id=task_spec.id, state=TaskState.PENDING))
-        for task_spec in ordered:
-            if task_spec.task_type == "human_approval":
-                existing = self._store.fetch(task_spec.id)
-                if existing and existing.approved:
-                    outputs[task_spec.id] = "Approved"
-                    self._store.upsert(
-                        TaskStateRecord(
-                            task_id=task_spec.id,
-                            state=TaskState.COMPLETED,
-                            output="Approved",
-                            approved=True,
-                            reason=task_spec.reason,
-                        )
+        input_store: Dict[str, Dict[str, Any]] = {}
+        result_store: Dict[str, Dict[str, Any]] = {}
+
+        try:
+            with self.integrations.telemetry.span(
+                "agx.autogen.run",
+                attributes={"tasks.count": len(ordered)},
+            ):
+                for task_spec in ordered:
+                    self._store.upsert(TaskStateRecord(task_id=task_spec.id, state=TaskState.PENDING))
+                    self.integrations.emit(
+                        {
+                            "type": "task_state",
+                            "engine": "autogen",
+                            "task_id": task_spec.id,
+                            "state": TaskState.PENDING.value,
+                        }
                     )
-                    continue
-                if self._approval_callback is not None:
-                    decision = self._approval_callback(task_spec)
-                    if decision:
-                        outputs[task_spec.id] = "Approved"
+                for task_spec in ordered:
+                    task_spec.input = resolve_bindings(
+                        task_spec.input,
+                        input_store=input_store,
+                        result_store=result_store,
+                    )
+                    task_spec.context = resolve_bindings(
+                        task_spec.context,
+                        input_store=input_store,
+                        result_store=result_store,
+                    )
+
+                    if task_spec.task_type == "agent_handoff":
+                        source_task = task_spec.source_task or (
+                            task_spec.depends_on[0] if task_spec.depends_on else ""
+                        )
+                        if not source_task:
+                            output = "agent_handoff task requires source_task or depends_on"
+                            outputs[task_spec.id] = output
+                            self._store.upsert(
+                                TaskStateRecord(
+                                    task_id=task_spec.id,
+                                    state=TaskState.FAILED,
+                                    error=output,
+                                )
+                            )
+                            self.integrations.emit(
+                                {
+                                    "type": "task_state",
+                                    "engine": "autogen",
+                                    "task_id": task_spec.id,
+                                    "state": TaskState.FAILED.value,
+                                }
+                            )
+                            break
+                        handoff = build_handoff_payload(
+                            source_task=source_task,
+                            result_store=result_store,
+                            target_agent=task_spec.agent,
+                        )
+                        output = json.dumps(handoff)
+                        task_spec.input = handoff
+                        outputs[task_spec.id] = output
+                        result_store[task_spec.id] = {"output": output, "parsed_output": handoff}
                         self._store.upsert(
                             TaskStateRecord(
                                 task_id=task_spec.id,
                                 state=TaskState.COMPLETED,
-                                output="Approved",
-                                approved=True,
+                                output=output,
+                            )
+                        )
+                        self.integrations.emit(
+                            {
+                                "type": "task_state",
+                                "engine": "autogen",
+                                "task_id": task_spec.id,
+                                "state": TaskState.COMPLETED.value,
+                            }
+                        )
+                        continue
+
+                    if task_spec.task_type == "human_approval":
+                        existing = self._store.fetch(task_spec.id)
+                        if existing and existing.approved:
+                            outputs[task_spec.id] = "Approved"
+                            self._store.upsert(
+                                TaskStateRecord(
+                                    task_id=task_spec.id,
+                                    state=TaskState.COMPLETED,
+                                    output="Approved",
+                                    approved=True,
+                                    reason=task_spec.reason,
+                                )
+                            )
+                            self.integrations.emit(
+                                {
+                                    "type": "task_state",
+                                    "engine": "autogen",
+                                    "task_id": task_spec.id,
+                                    "state": TaskState.COMPLETED.value,
+                                }
+                            )
+                            continue
+                        if self._approval_callback is not None:
+                            decision = self._approval_callback(task_spec)
+                            if decision:
+                                outputs[task_spec.id] = "Approved"
+                                self._store.upsert(
+                                    TaskStateRecord(
+                                        task_id=task_spec.id,
+                                        state=TaskState.COMPLETED,
+                                        output="Approved",
+                                        approved=True,
+                                        reason=task_spec.reason,
+                                    )
+                                )
+                                self.integrations.emit(
+                                    {
+                                        "type": "task_state",
+                                        "engine": "autogen",
+                                        "task_id": task_spec.id,
+                                        "state": TaskState.COMPLETED.value,
+                                    }
+                                )
+                                continue
+                        wait_msg = f"WAITING_HUMAN: {task_spec.reason or ''}".strip()
+                        outputs[task_spec.id] = wait_msg
+                        self._store.upsert(
+                            TaskStateRecord(
+                                task_id=task_spec.id,
+                                state=TaskState.WAITING_HUMAN,
+                                output=wait_msg,
+                                approved=False,
                                 reason=task_spec.reason,
                             )
                         )
-                        continue
-                wait_msg = f"WAITING_HUMAN: {task_spec.reason or ''}".strip()
-                outputs[task_spec.id] = wait_msg
-                self._store.upsert(
-                    TaskStateRecord(
-                        task_id=task_spec.id,
-                        state=TaskState.WAITING_HUMAN,
-                        output=wait_msg,
-                        approved=False,
-                        reason=task_spec.reason,
-                    )
-                )
-                break
-            if task_spec.task_type == "human_input":
-                wait_msg = "WAITING_INPUT"
-                outputs[task_spec.id] = wait_msg
-                self._store.upsert(
-                    TaskStateRecord(
-                        task_id=task_spec.id,
-                        state=TaskState.WAITING_HUMAN,
-                        output=wait_msg,
-                        approved=False,
-                        reason=task_spec.description,
-                    )
-                )
-                break
+                        self.integrations.emit(
+                            {
+                                "type": "task_state",
+                                "engine": "autogen",
+                                "task_id": task_spec.id,
+                                "state": TaskState.WAITING_HUMAN.value,
+                            }
+                        )
+                        break
 
-            self._store.upsert(TaskStateRecord(task_id=task_spec.id, state=TaskState.RUNNING))
-            try:
-                outputs[task_spec.id] = self.run_task(task_spec)
-                self._store.upsert(
-                    TaskStateRecord(
-                        task_id=task_spec.id,
-                        state=TaskState.COMPLETED,
-                        output=outputs[task_spec.id],
+                    if task_spec.task_type == "human_input":
+                        wait_msg = "WAITING_INPUT"
+                        outputs[task_spec.id] = wait_msg
+                        self._store.upsert(
+                            TaskStateRecord(
+                                task_id=task_spec.id,
+                                state=TaskState.WAITING_HUMAN,
+                                output=wait_msg,
+                                approved=False,
+                                reason=task_spec.description,
+                            )
+                        )
+                        self.integrations.emit(
+                            {
+                                "type": "task_state",
+                                "engine": "autogen",
+                                "task_id": task_spec.id,
+                                "state": TaskState.WAITING_HUMAN.value,
+                            }
+                        )
+                        break
+
+                    self._store.upsert(TaskStateRecord(task_id=task_spec.id, state=TaskState.RUNNING))
+                    self.integrations.emit(
+                        {
+                            "type": "task_state",
+                            "engine": "autogen",
+                            "task_id": task_spec.id,
+                            "state": TaskState.RUNNING.value,
+                        }
                     )
-                )
-            except Exception as exc:
-                self._store.upsert(
-                    TaskStateRecord(
-                        task_id=task_spec.id,
-                        state=TaskState.FAILED,
-                        error=str(exc),
-                    )
-                )
-                raise
-        return outputs
+                    try:
+                        outputs[task_spec.id] = self.run_task(task_spec)
+                        self._store.upsert(
+                            TaskStateRecord(
+                                task_id=task_spec.id,
+                                state=TaskState.COMPLETED,
+                                output=outputs[task_spec.id],
+                            )
+                        )
+                        parsed = parse_output_text(outputs[task_spec.id])
+                        result_store[task_spec.id] = {"output": outputs[task_spec.id], "parsed_output": parsed}
+                        if task_spec.task_type == "human_input" and isinstance(parsed, dict):
+                            input_store[task_spec.id] = parsed
+                        self.integrations.emit(
+                            {
+                                "type": "task_state",
+                                "engine": "autogen",
+                                "task_id": task_spec.id,
+                                "state": TaskState.COMPLETED.value,
+                            }
+                        )
+                    except Exception as exc:
+                        self._store.upsert(
+                            TaskStateRecord(
+                                task_id=task_spec.id,
+                                state=TaskState.FAILED,
+                                error=str(exc),
+                            )
+                        )
+                        self.integrations.emit(
+                            {
+                                "type": "task_state",
+                                "engine": "autogen",
+                                "task_id": task_spec.id,
+                                "state": TaskState.FAILED.value,
+                                "error": str(exc),
+                            }
+                        )
+                        raise
+            return outputs
+        finally:
+            self.integrations.close()
 
     def run_task(self, task_spec) -> str:
-        agent_spec = self.config.get_agent(task_spec.agent)
-        assistant = self._build_assistant(agent_spec, task_spec.id)
-        user = self._build_user(task_spec.id)
-        prompt = self._build_task_prompt(task_spec, agent_spec)
-        result = user.initiate_chat(
-            assistant,
-            message=prompt,
-            max_turns=max(4, agent_spec.planning.max_iterations * 2),
-        )
-        content = self._extract_content(result)
-        if self._needs_json_output(task_spec):
-            parsed = self._extract_json_from_text(content)
-            if parsed is None:
-                retry_prompt = prompt + "\n\nSTRICT_MODE: Return JSON only. No code, no markdown, no extra text."
-                retry_result = user.initiate_chat(
-                    assistant,
-                    message=retry_prompt,
-                    max_turns=max(2, agent_spec.planning.max_iterations),
-                )
-                content = self._extract_content(retry_result)
+        with self.integrations.telemetry.span(
+            "agx.autogen.run_task",
+            attributes={"task.id": task_spec.id, "agent": task_spec.agent},
+        ):
+            agent_spec = self.config.get_agent(task_spec.agent)
+            assistant = self._build_assistant(agent_spec, task_spec.id)
+            user = self._build_user(task_spec.id)
+            prompt = self._build_task_prompt(task_spec, agent_spec)
+            result = user.initiate_chat(
+                assistant,
+                message=prompt,
+                max_turns=max(4, agent_spec.planning.max_iterations * 2),
+            )
+            content = self._extract_content(result)
+            if self._needs_json_output(task_spec):
                 parsed = self._extract_json_from_text(content)
-            if parsed is not None:
-                try:
-                    return json.dumps(parsed, indent=2)
-                except Exception:
-                    return json.dumps(parsed)
-        return content
+                if parsed is None:
+                    retry_prompt = prompt + "\n\nSTRICT_MODE: Return JSON only. No code, no markdown, no extra text."
+                    retry_result = user.initiate_chat(
+                        assistant,
+                        message=retry_prompt,
+                        max_turns=max(2, agent_spec.planning.max_iterations),
+                    )
+                    content = self._extract_content(retry_result)
+                    parsed = self._extract_json_from_text(content)
+                if parsed is not None:
+                    try:
+                        return json.dumps(parsed, indent=2)
+                    except Exception:
+                        return json.dumps(parsed)
+            return content
 
     def _build_assistant(self, agent_spec: AgentSpec, task_id: str) -> AssistantAgent:
         llm_params = self._resolve_llm_params(agent_spec)
@@ -197,6 +354,15 @@ class AutogenOrchestrator:
     def _wrap_tool(self, name: str, tool, agent_name: str, task_id: str):
         def _tool_func(input_text: Any = "", **kwargs: Any) -> str:
             payload = self._format_tool_input(input_text, kwargs)
+            self.integrations.emit(
+                {
+                    "type": "tool_call",
+                    "engine": "autogen",
+                    "tool": name,
+                    "agent": agent_name,
+                    "task_id": task_id,
+                }
+            )
             result = tool.run(
                 input_text=payload,
                 context=ToolContext(

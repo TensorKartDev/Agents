@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 from ..config import AgentSpec, ProjectConfig, instantiate_from_path
 from ..llm.provider import LLMProvider
 from ..memory.simple import ConversationBufferMemory
+from ..runtime.integrations import RuntimeIntegrations, build_runtime_integrations
 from ..tasks.base import HumanApprovalTask, HumanInputTask, Task
 from ..tasks.runner import TaskRunner
 from ..tools.builtin import register_builtin_tools
@@ -18,8 +20,18 @@ from .base import Agent, PlanningConfig
 class Orchestrator:
     """Builds agents/tools from config and runs the requested tasks."""
 
-    def __init__(self, project_config: ProjectConfig) -> None:
+    def __init__(
+        self,
+        project_config: ProjectConfig,
+        integrations: Optional[RuntimeIntegrations] = None,
+    ) -> None:
         self.config = project_config
+        self.integrations = integrations or build_runtime_integrations(
+            {
+                "middleware": self.config.defaults.middleware,
+                "observability": self.config.defaults.observability,
+            }
+        )
         self.tool_registry = ToolRegistry()
         register_builtin_tools(self.tool_registry)
         # Discover any tools provided by installed packages via entry points
@@ -38,7 +50,7 @@ class Orchestrator:
         self.tool_registry.configure_from_specs(self.config.tool_specs)
         self.agents: Dict[str, Agent] = self._build_agents()
         self.tasks = self._build_tasks()
-        self.runner = TaskRunner(self._resolve_agent)
+        self.runner = TaskRunner(self._resolve_agent, integrations=self.integrations)
 
     def _resolve_agent(self, name: str) -> Agent:
         try:
@@ -91,6 +103,10 @@ class Orchestrator:
                         context=spec.context,
                         expected_output=spec.expected_output,
                         depends_on=spec.depends_on,
+                        task_type=spec.task_type,
+                        source_task=spec.source_task,
+                        tool=spec.tool,
+                        continue_on_error=spec.continue_on_error,
                         reason=spec.reason or "",
                     )
                 )
@@ -105,6 +121,10 @@ class Orchestrator:
                         context=spec.context,
                         expected_output=spec.expected_output,
                         depends_on=spec.depends_on,
+                        task_type=spec.task_type,
+                        source_task=spec.source_task,
+                        tool=spec.tool,
+                        continue_on_error=spec.continue_on_error,
                         ui=spec.ui or {},
                     )
                 )
@@ -118,6 +138,10 @@ class Orchestrator:
                     context=spec.context,
                     expected_output=spec.expected_output,
                     depends_on=spec.depends_on,
+                    task_type=spec.task_type,
+                    source_task=spec.source_task,
+                    tool=spec.tool,
+                    continue_on_error=spec.continue_on_error,
                 )
             )
         return items
