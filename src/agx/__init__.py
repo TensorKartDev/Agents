@@ -34,5 +34,5 @@ def _resolve_version() -> str:
 
 
 __version__ = _resolve_version()
-
+print(__version__)
 __all__ = ["app", "__version__"]
