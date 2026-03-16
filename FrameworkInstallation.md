@@ -10,6 +10,30 @@ pip install --upgrade pip
 pip install -e .
 ```
 
+If you already have an existing virtualenv such as `agentenv`, rerun:
+
+```bash
+pip install -e .
+```
+
+This is required after dependency changes such as the web auth/session stack adding `itsdangerous`, `authlib`, or `python-multipart`.
+
+Google FedCM sign-in also requires the backend token-verification dependency now included in the project:
+
+```bash
+pip install -e .
+```
+
+For Google sign-in to work in a browser, configure:
+
+- `AGX_GOOGLE_CLIENT_ID` for FedCM-enabled sign-in
+- `AGX_GOOGLE_CLIENT_SECRET` if you also want OAuth redirect fallback for browsers without FedCM
+
+And register your AGX origin in the Google Cloud OAuth client configuration, for example:
+
+- Authorized JavaScript origin: `http://localhost:8000`
+- Redirect URI for legacy fallback: `http://localhost:8000/auth/oauth/google/callback`
+
 ## Run an example scenario
 
 ```bash

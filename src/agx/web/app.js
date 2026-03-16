@@ -8,6 +8,7 @@ const state = {
   runsByPath: {},
   tabs: {},
   activeTabId: null,
+  user: null,
 };
 
 function getActiveTab() {
@@ -163,10 +164,42 @@ window.addEventListener("unhandledrejection", (e) => {
 
 document.addEventListener("DOMContentLoaded", () => {
   state.logEl = null;
-  fetchAndRenderAgents();
   fetchMeta();
-  startRunsPolling();
+  initializeRunner();
 });
+
+async function initializeRunner() {
+  try {
+    const response = await fetch('/api/auth/me');
+    if (!response.ok) {
+      window.location.replace('/login?next=/');
+      return;
+    }
+    state.user = await response.json();
+    renderCurrentUser();
+    bindLogout();
+    fetchAndRenderAgents();
+    startRunsPolling();
+  } catch (_) {
+    window.location.replace('/login?next=/');
+  }
+}
+
+function renderCurrentUser() {
+  const badge = document.getElementById('runner-user-badge');
+  if (badge && state.user) {
+    badge.textContent = `${state.user.display_name || state.user.username} • ${state.user.role}`;
+  }
+}
+
+function bindLogout() {
+  const button = document.getElementById('runner-logout');
+  if (!button) return;
+  button.onclick = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    window.location.replace('/login?next=/');
+  };
+}
 
 function fetchMeta() {
   const el = document.getElementById('app-version');

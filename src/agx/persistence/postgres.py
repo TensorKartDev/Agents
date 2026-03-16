@@ -16,6 +16,8 @@ class RunRecord:
     run_id: str
     project: str
     engine: str
+    owner_user_id: Optional[str]
+    owner_username: Optional[str]
     config_path: str
     requested_path: str
     total_tasks: int
@@ -42,6 +44,8 @@ class PostgresRunStore:
                     run_id TEXT PRIMARY KEY,
                     project TEXT NOT NULL,
                     engine TEXT NOT NULL,
+                    owner_user_id TEXT,
+                    owner_username TEXT,
                     config_path TEXT NOT NULL,
                     requested_path TEXT NOT NULL,
                     total_tasks INTEGER NOT NULL,
@@ -53,6 +57,18 @@ class PostgresRunStore:
                 )
                 """
             )
+            columns = conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'agx_runs'
+                """
+            ).fetchall()
+            names = {row["column_name"] for row in columns}
+            if "owner_user_id" not in names:
+                conn.execute("ALTER TABLE agx_runs ADD COLUMN owner_user_id TEXT")
+            if "owner_username" not in names:
+                conn.execute("ALTER TABLE agx_runs ADD COLUMN owner_username TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agx_run_events (
@@ -75,6 +91,8 @@ class PostgresRunStore:
         run_id: str,
         project: str,
         engine: str,
+        owner_user_id: Optional[str],
+        owner_username: Optional[str],
         config_path: str,
         requested_path: str,
         total_tasks: int,
@@ -88,13 +106,15 @@ class PostgresRunStore:
             conn.execute(
                 """
                 INSERT INTO agx_runs (
-                    run_id, project, engine, config_path, requested_path,
+                    run_id, project, engine, owner_user_id, owner_username, config_path, requested_path,
                     total_tasks, completed_tasks, completed, stop_requested,
                     started_at, updated_at
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (run_id) DO UPDATE SET
                     project=excluded.project,
                     engine=excluded.engine,
+                    owner_user_id=excluded.owner_user_id,
+                    owner_username=excluded.owner_username,
                     config_path=excluded.config_path,
                     requested_path=excluded.requested_path,
                     total_tasks=excluded.total_tasks,
@@ -107,6 +127,8 @@ class PostgresRunStore:
                     run_id,
                     project,
                     engine,
+                    owner_user_id,
+                    owner_username,
                     config_path,
                     requested_path,
                     total_tasks,
@@ -159,6 +181,7 @@ class PostgresRunStore:
             rows = conn.execute(
                 """
                 SELECT run_id, project, engine, config_path, requested_path,
+                       owner_user_id, owner_username,
                        total_tasks, completed_tasks, completed, stop_requested,
                        started_at, updated_at
                 FROM agx_runs
@@ -174,6 +197,8 @@ class PostgresRunStore:
                     run_id=row["run_id"],
                     project=row["project"],
                     engine=row["engine"],
+                    owner_user_id=row.get("owner_user_id"),
+                    owner_username=row.get("owner_username"),
                     config_path=row["config_path"],
                     requested_path=row["requested_path"],
                     total_tasks=int(row["total_tasks"]),

@@ -19,6 +19,8 @@ An enterprise-grade framework for building, operating, and scaling intelligent a
 
 AGX is optimized for agent creators. You define intent and capabilities in YAML, plug in tools, and register your agent so teams can run it safely through the shared UI and CLI.
 
+The packaging and installation contract for AGX-compatible agents is defined in [AAPS.md](/home/administrator/source/Agents/AAPS.md).
+
 ### 1) Create an agent package
 
 Create a new folder under `agents/` with a manifest and a config:
@@ -28,6 +30,8 @@ agents/<your_agent_slug>/
   agent.yaml
   config.yaml
 ```
+
+That directory layout is the minimum AAPS package root.
 
 ### 2) Define the agent manifest
 
@@ -179,6 +183,62 @@ The runtime should not assume that agent packages, workflows, or their tests liv
 - Framework tests should validate runtime contracts only; agent-specific workflow tests should live with the agent pack, not in the core runtime suite.
 
 The repo-local `agents/` folder is now just the default workspace convention, not a framework requirement.
+
+For the formal package, install, and security contract behind that separation, see [AAPS.md](/home/administrator/source/Agents/AAPS.md).
+
+## Security and marketplace admin
+
+AGX now supports a lightweight runtime security layer for separate deployment testing:
+
+- Marketplace users authenticate through the admin web surface using a signed session cookie.
+- Roles are `developer`, `manager`, and `admin`.
+- Admin APIs automatically scope run history and uploaded packages to `owner_user_id` unless the logged-in role is `admin`.
+- Agent packages can be uploaded as `.zip` bundles through the admin page and installed into the configured agent-pack root.
+- Package metadata and runtime counters track `uploaded_at`, `restart_count`, `traffic_count`, and `last_run_at`.
+
+These behaviors are intended to align with the AAPS managed-install model in [AAPS.md](/home/administrator/source/Agents/AAPS.md).
+
+Recommended bootstrap for a fresh deployment:
+
+- Set `AGX_AUTH_SECRET` to a strong secret.
+- Set `AGX_BOOTSTRAP_USERS` to a JSON array with at least one admin user.
+- Configure one or more external identity providers so developers use existing accounts instead of AGX-local passwords.
+- Optionally move `AGX_AGENTS_DIR`, `AGX_AGENT_REGISTRY`, and `AGX_RUNS_DIR` outside the runtime repo.
+
+Example:
+
+```bash
+export AGX_AUTH_SECRET="replace-this"
+export AGX_BOOTSTRAP_USERS='[{"tenant_name":"Emerson","tenant_domain":"emerson.com","username":"admin","email":"admin@emerson.com","password":"change-me","role":"admin","display_name":"Marketplace Admin"}]'
+export AGX_AGENTS_DIR="/srv/agx/agents"
+export AGX_AGENT_REGISTRY="/srv/agx/registry/agents.yaml"
+export AGX_RUNS_DIR="/srv/agx/runs"
+```
+
+### External login providers
+
+AGX supports external login so agent developers can reuse existing identities:
+
+- Google via FedCM-backed Google Identity Services
+- GitHub via OAuth
+
+The runtime auto-provisions AGX users from the external identity and assigns roles based on email allowlists:
+
+- `AGX_ADMIN_EMAILS`
+- `AGX_MANAGER_EMAILS`
+- `AGX_ALLOWED_LOGIN_DOMAINS`
+
+Local username/password login remains available as a bootstrap and fallback path for AGX-managed accounts.
+
+Users are persisted in the admin database with:
+
+- tenant membership
+- unique email address
+- username
+- role
+- external identity links when Google/GitHub SSO is used
+
+The tenant model is domain-based by default. For example, AGX can maintain a tenant named `Emerson` with domain `emerson.com`, and users such as `ashish.madkaikar@emerson.com` and `nitin.k@emerson.com` will belong to that tenant.
 
 ## Architecture
 

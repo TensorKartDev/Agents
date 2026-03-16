@@ -13,98 +13,242 @@
       <div class="glass-card p-4 mb-4">
         <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
           <div>
-            <h1 class="display-6 fw-bold neon mb-1"><i class="bi bi-shield-lock"></i> AGX Run Admin</h1>
-            <p class="text-secondary mb-0">Inspect persisted run history and delete stale runs</p>
+            <h1 class="display-6 fw-bold neon mb-1"><i class="bi bi-shield-lock"></i> AGX Marketplace Admin</h1>
+            <p class="text-secondary mb-0">Secure run history, package upload, ownership, and agent runtime visibility</p>
           </div>
-          <div class="d-flex align-items-center gap-2">
+          <div class="d-flex align-items-center gap-2 flex-wrap">
             <a href="/" class="btn btn-outline-dark btn-sm"><i class="bi bi-arrow-left"></i> Runner</a>
             <span class="badge bg-dark text-light" id="admin-version">v0.0.0</span>
+            <span class="badge bg-info-subtle text-info-emphasis d-none" id="auth-user-badge"></span>
+            <button id="logout-button" class="btn btn-outline-danger btn-sm d-none"><i class="bi bi-box-arrow-right"></i> Logout</button>
           </div>
         </div>
       </div>
 
-      <div class="glass-card p-4 mb-4">
-        <div class="row g-3 align-items-end">
-          <div class="col-12 col-md-3">
-            <label for="filter-run-id" class="form-label small text-uppercase text-secondary">Run ID</label>
-            <input id="filter-run-id" class="form-control" type="text" placeholder="Contains run id" />
-          </div>
-          <div class="col-12 col-md-3">
-            <label for="filter-project" class="form-label small text-uppercase text-secondary">Project</label>
-            <input id="filter-project" class="form-control" type="text" placeholder="Contains project" />
-          </div>
-          <div class="col-12 col-md-2">
-            <label for="filter-engine" class="form-label small text-uppercase text-secondary">Engine</label>
-            <select id="filter-engine" class="form-select">
-              <option value="">All</option>
-              <option value="autogen">autogen</option>
-              <option value="legacy">legacy</option>
-              <option value="unknown">unknown</option>
-            </select>
-          </div>
-          <div class="col-12 col-md-2">
-            <label for="filter-completed" class="form-label small text-uppercase text-secondary">Status</label>
-            <select id="filter-completed" class="form-select">
-              <option value="">All</option>
-              <option value="false">Active</option>
-              <option value="true">Completed</option>
-            </select>
-          </div>
-          <div class="col-12 col-md-2 d-grid">
-            <button id="runs-refresh" class="btn btn-primary"><i class="bi bi-arrow-repeat"></i> Refresh</button>
-          </div>
-        </div>
-        <div class="small text-secondary mt-3" id="runs-summary">Loading run inventory...</div>
-      </div>
-
-      <div class="row g-4">
-        <div class="col-12 col-lg-5">
-          <div class="glass-card p-3 admin-panel">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-              <div>
-                <h2 class="h5 mb-0 text-info">Runs</h2>
-                <small class="text-secondary">Filter and select a run</small>
-              </div>
+      <div class="glass-card p-4 mb-4" id="login-card">
+        <div class="row g-4 align-items-center">
+          <div class="col-12 col-lg-6">
+            <h2 class="h4 text-info mb-2">Authenticate</h2>
+            <p class="text-secondary mb-0">Use your existing identity provider account to scope runs, uploads, and admin actions to your identity.</p>
+            <div class="vstack gap-2 mt-3" id="oauth-provider-list">
+              <div class="text-secondary small">Loading sign-in providers...</div>
             </div>
-            <div id="admin-run-list" class="admin-list"></div>
-          </div>
-        </div>
-        <div class="col-12 col-lg-7">
-          <div class="glass-card p-3 admin-panel">
-            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-              <div>
-                <h2 class="h5 mb-0 text-info">Events</h2>
-                <small class="text-secondary" id="selected-run-meta">Select a run to inspect events</small>
-              </div>
-              <button id="delete-run" class="btn btn-outline-danger btn-sm" disabled>
-                <i class="bi bi-trash3"></i> Delete Run
-              </button>
+            <div class="small text-secondary mt-3">
+              Local username/password login remains available only as a fallback bootstrap path.
             </div>
-
-            <div class="row g-3 align-items-end mb-3">
-              <div class="col-12 col-md-4">
-                <label for="filter-event-type" class="form-label small text-uppercase text-secondary">Event Type</label>
-                <select id="filter-event-type" class="form-select">
-                  <option value="">All</option>
-                </select>
+          </div>
+          <div class="col-12 col-lg-6">
+            <form id="login-form" class="row g-3">
+              <div class="col-12 col-md-5">
+                <label for="login-username" class="form-label small text-uppercase text-secondary">Username</label>
+                <input id="login-username" class="form-control" autocomplete="username" required />
               </div>
-              <div class="col-12 col-md-6">
-                <label for="filter-event-query" class="form-label small text-uppercase text-secondary">Search</label>
-                <input id="filter-event-query" class="form-control" type="text" placeholder="Search event payload" />
+              <div class="col-12 col-md-5">
+                <label for="login-password" class="form-label small text-uppercase text-secondary">Password</label>
+                <input id="login-password" class="form-control" type="password" autocomplete="current-password" required />
               </div>
               <div class="col-12 col-md-2 d-grid">
-                <button id="events-refresh" class="btn btn-outline-primary" disabled>Filter</button>
+                <button class="btn btn-primary" type="submit">Login</button>
               </div>
-            </div>
-
-            <div class="small text-secondary mb-3" id="events-summary">No run selected.</div>
-            <div id="admin-event-list" class="admin-list admin-events"></div>
+            </form>
+            <div class="small mt-3" id="login-status">Authentication required.</div>
           </div>
         </div>
+      </div>
+
+      <div id="admin-shell" class="d-none">
+        <div class="glass-card p-3 mb-4">
+          <ul class="nav nav-pills gap-2" id="admin-tab-bar">
+            <li class="nav-item"><button class="nav-link active" type="button" data-admin-tab="runs">Runs</button></li>
+            <li class="nav-item"><button class="nav-link" type="button" data-admin-tab="packages">Packages</button></li>
+            <li class="nav-item d-none" id="users-tab-item"><button class="nav-link" type="button" data-admin-tab="users">Users</button></li>
+          </ul>
+        </div>
+
+        <section data-admin-panel="runs">
+          <div class="glass-card p-4 mb-4">
+            <div class="row g-3 align-items-end">
+              <div class="col-12 col-md-3">
+                <label for="filter-run-id" class="form-label small text-uppercase text-secondary">Run ID</label>
+                <input id="filter-run-id" class="form-control" type="text" placeholder="Contains run id" />
+              </div>
+              <div class="col-12 col-md-3">
+                <label for="filter-project" class="form-label small text-uppercase text-secondary">Project</label>
+                <input id="filter-project" class="form-control" type="text" placeholder="Contains project" />
+              </div>
+              <div class="col-12 col-md-2">
+                <label for="filter-engine" class="form-label small text-uppercase text-secondary">Engine</label>
+                <select id="filter-engine" class="form-select">
+                  <option value="">All</option>
+                  <option value="autogen">autogen</option>
+                  <option value="legacy">legacy</option>
+                  <option value="unknown">unknown</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-2">
+                <label for="filter-completed" class="form-label small text-uppercase text-secondary">Status</label>
+                <select id="filter-completed" class="form-select">
+                  <option value="">All</option>
+                  <option value="false">Active</option>
+                  <option value="true">Completed</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-2 d-grid">
+                <button id="runs-refresh" class="btn btn-primary"><i class="bi bi-arrow-repeat"></i> Refresh</button>
+              </div>
+            </div>
+            <div class="small text-secondary mt-3" id="runs-summary">Loading run inventory...</div>
+          </div>
+
+          <div class="row g-4">
+            <div class="col-12 col-lg-5">
+              <div class="glass-card p-3 admin-panel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Runs</h2>
+                    <small class="text-secondary">Automatically scoped to the authenticated user unless role is `admin`.</small>
+                  </div>
+                </div>
+                <div id="admin-run-list" class="admin-list"></div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-7">
+              <div class="glass-card p-3 admin-panel">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Events</h2>
+                    <small class="text-secondary" id="selected-run-meta">Select a run to inspect events</small>
+                  </div>
+                  <button id="delete-run" class="btn btn-outline-danger btn-sm" disabled>
+                    <i class="bi bi-trash3"></i> Delete Run
+                  </button>
+                </div>
+
+                <div class="row g-3 align-items-end mb-3">
+                  <div class="col-12 col-md-4">
+                    <label for="filter-event-type" class="form-label small text-uppercase text-secondary">Event Type</label>
+                    <select id="filter-event-type" class="form-select">
+                      <option value="">All</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label for="filter-event-query" class="form-label small text-uppercase text-secondary">Search</label>
+                    <input id="filter-event-query" class="form-control" type="text" placeholder="Search event payload" />
+                  </div>
+                  <div class="col-12 col-md-2 d-grid">
+                    <button id="events-refresh" class="btn btn-outline-primary" disabled>Filter</button>
+                  </div>
+                </div>
+
+                <div class="small text-secondary mb-3" id="events-summary">No run selected.</div>
+                <div id="admin-event-list" class="admin-list admin-events"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section data-admin-panel="packages" class="d-none">
+          <div class="row g-4">
+            <div class="col-12 col-lg-5">
+              <div class="glass-card p-4 admin-panel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Upload Agent Package</h2>
+                    <small class="text-secondary">Upload a zipped agent pack containing `agent.yaml` and its workflow config.</small>
+                  </div>
+                </div>
+                <form id="package-upload-form" class="vstack gap-3">
+                  <div>
+                    <label for="package-file" class="form-label small text-uppercase text-secondary">Zip Package</label>
+                    <input id="package-file" class="form-control" type="file" accept=".zip" required />
+                  </div>
+                  <button class="btn btn-primary" type="submit"><i class="bi bi-cloud-upload"></i> Upload And Install</button>
+                </form>
+                <div class="small mt-3" id="package-upload-status">No package uploaded yet.</div>
+                <div class="admin-preview mt-4" id="package-preview">
+                  <div class="text-secondary small">Preview appears here after upload.</div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-7">
+              <div class="glass-card p-4 admin-panel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Installed Packages</h2>
+                    <small class="text-secondary">Traffic and restart counts are tracked by the framework runtime.</small>
+                  </div>
+                  <button id="packages-refresh" class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-repeat"></i> Refresh</button>
+                </div>
+                <div id="package-list" class="admin-list"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section data-admin-panel="users" class="d-none">
+          <div class="row g-4">
+            <div class="col-12 col-lg-5">
+              <div class="glass-card p-4 admin-panel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Create Marketplace User</h2>
+                    <small class="text-secondary">Admin-only bootstrap for separate deployment tests.</small>
+                  </div>
+                </div>
+                <form id="user-create-form" class="row g-3">
+                  <div class="col-12">
+                    <label for="new-tenant-name" class="form-label small text-uppercase text-secondary">Tenant Name</label>
+                    <input id="new-tenant-name" class="form-control" placeholder="Example: Emerson" />
+                  </div>
+                  <div class="col-12">
+                    <label for="new-username" class="form-label small text-uppercase text-secondary">Username</label>
+                    <input id="new-username" class="form-control" required />
+                  </div>
+                  <div class="col-12">
+                    <label for="new-email" class="form-label small text-uppercase text-secondary">Email</label>
+                    <input id="new-email" class="form-control" type="email" required />
+                  </div>
+                  <div class="col-12">
+                    <label for="new-display-name" class="form-label small text-uppercase text-secondary">Display Name</label>
+                    <input id="new-display-name" class="form-control" />
+                  </div>
+                  <div class="col-12">
+                    <label for="new-password" class="form-label small text-uppercase text-secondary">Password</label>
+                    <input id="new-password" class="form-control" type="password" required />
+                  </div>
+                  <div class="col-12">
+                    <label for="new-role" class="form-label small text-uppercase text-secondary">Role</label>
+                    <select id="new-role" class="form-select">
+                      <option value="developer">developer</option>
+                      <option value="manager">manager</option>
+                      <option value="admin">admin</option>
+                    </select>
+                  </div>
+                  <div class="col-12 d-grid">
+                    <button class="btn btn-primary" type="submit">Create User</button>
+                  </div>
+                </form>
+                <div class="small mt-3" id="user-create-status">Create users for developer or manager access.</div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-7">
+              <div class="glass-card p-4 admin-panel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Registered Users</h2>
+                    <small class="text-secondary">Visible only to admins.</small>
+                  </div>
+                  <button id="users-refresh" class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-repeat"></i> Refresh</button>
+                </div>
+                <div id="user-list" class="admin-list"></div>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
 
     <script src="/static/bootstrap.js"></script>
-    <script src="/static/admin.js?v=1"></script>
+    <script src="/static/admin.js?v=2"></script>
   </body>
 </html>

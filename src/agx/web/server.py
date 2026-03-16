@@ -12,25 +12,41 @@ import re
 import subprocess
 import io
 import contextlib
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
+try:
+    from authlib.integrations.starlette_client import OAuth
+except Exception:  # pragma: no cover - optional dependency
+    OAuth = None
+try:
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2 import id_token as google_id_token
+except Exception:  # pragma: no cover - optional dependency
+    GoogleAuthRequest = None
+    google_id_token = None
 from starlette.websockets import WebSocketState
-from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from ..admin_store import AdminStore, PackageRecord
 from ..agents.manifest import normalize_manifest, validate_manifest
 from .. import __version__ as agx_version
 from ..agents.orchestrator import Orchestrator
 from ..autogen_runner import AutogenOrchestrator
 from ..config import ProjectConfig
+from ..oauth_providers import load_oauth_providers, visible_provider_cards
 from ..persistence import PostgresRunStore
 from ..runtime.integrations import build_runtime_integrations
 from ..runtime.interoperability import build_handoff_payload, parse_output_text, resolve_bindings
+from ..security import AuthManager, SessionUser
 from ..workspace import resolve_workspace_paths
 from dotenv import load_dotenv
 load_dotenv()
@@ -94,6 +110,7 @@ from ..tools.base import ToolContext
 
 
 app = FastAPI(title="AGX Web Runner")
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("AGX_AUTH_SECRET", "agx-dev-secret-change-me"))
 app.mount("/static", StaticFiles(directory=Path(__file__).parent), name="static")
 
 WORKSPACE = resolve_workspace_paths()
@@ -103,11 +120,34 @@ AGENT_REGISTRY = WORKSPACE.registry_path
 STATIC_IMG = Path(__file__).parent / "img"
 INDEX_HTML = Path(__file__).parent / "index.html"
 ADMIN_HTML = Path(__file__).parent / "admin.html"
+LOGIN_HTML = Path(__file__).parent / "login.html"
 RUNS_DIR = WORKSPACE.runs_dir
+ADMIN_DB_PATH = Path(os.getenv("AGX_ADMIN_DB_PATH", str(BASE_DIR / ".agx" / "admin.db"))).expanduser().resolve()
+AUTH_COOKIE_NAME = "agx_session"
+AUTH = AuthManager()
+ADMIN_STORE = AdminStore(ADMIN_DB_PATH)
+OAUTH_PROVIDERS = load_oauth_providers()
+OAUTH = OAuth() if OAuth is not None else None
 
-if AGENTS_DIR.exists():
-    # Mount so icons and assets inside agent folders can be served statically.
-    app.mount("/agents", StaticFiles(directory=AGENTS_DIR), name="agents")
+if OAUTH is not None:
+    for provider in OAUTH_PROVIDERS.values():
+        if provider.name == "google" and not provider.client_secret:
+            continue
+        kwargs: Dict[str, Any] = {
+            "client_id": provider.client_id,
+            "client_secret": provider.client_secret,
+            "client_kwargs": {"scope": provider.scopes},
+        }
+        if provider.kind == "oidc":
+            kwargs["server_metadata_url"] = provider.server_metadata_url
+        else:
+            kwargs["authorize_url"] = provider.authorize_url
+            kwargs["access_token_url"] = provider.access_token_url
+            kwargs["api_base_url"] = provider.api_base_url
+        OAUTH.register(provider.name, **kwargs)
+
+# Mount so icons and assets inside agent folders can be served statically.
+app.mount("/agents", StaticFiles(directory=AGENTS_DIR, check_dir=False), name="agents")
 
 # Mount default static images (e.g., robot.svg) if present
 if STATIC_IMG.exists():
@@ -117,6 +157,7 @@ if STATIC_IMG.exists():
 @app.on_event("startup")
 async def init_run_store() -> None:
     global RUN_STORE
+    ADMIN_STORE.bootstrap_users(AUTH)
     db_url = os.getenv("AGX_DB_URL", "").strip()
     #db_url = "dbname=agx user=admin password= host=localhost port=5432"
 
@@ -132,6 +173,8 @@ async def init_run_store() -> None:
         state = RunState(
             config=config,
             engine=record.engine,
+            owner_user_id=record.owner_user_id,
+            owner_username=record.owner_username,
             config_path=record.config_path,
             requested_path=record.requested_path,
             total_tasks=record.total_tasks,
@@ -247,8 +290,11 @@ def scan_for_agents() -> List[AgentInfo]:
 
 
 @app.get("/api/agents")
-async def list_agents() -> JSONResponse:
+async def list_agents(request: Request) -> JSONResponse:
     """Return a list of discoverable agents."""
+    user = AUTH.read_session(request.cookies.get(AUTH_COOKIE_NAME, ""))
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     agents = scan_for_agents()
     return JSONResponse([agent.__dict__ for agent in agents])
 
@@ -263,6 +309,8 @@ class RunState:
     config: ProjectConfig
     engine: str
     config_path: str
+    owner_user_id: Optional[str] = None
+    owner_username: Optional[str] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
     subscribers: List[asyncio.Queue] = field(default_factory=list)
     task: asyncio.Task | None = None
@@ -284,6 +332,25 @@ RUN_STORE: PostgresRunStore | None = None
 class RunRequest(BaseModel):
     config_path: str
     engine: str = "autogen"
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class GoogleFedCMLoginRequest(BaseModel):
+    credential: str
+    select_by: Optional[str] = None
+
+
+class CreateUserRequest(BaseModel):
+    tenant_name: Optional[str] = None
+    username: str
+    email: str
+    password: str
+    role: str = "developer"
+    display_name: Optional[str] = None
 
 
 class InputSubmit(BaseModel):
@@ -376,22 +443,463 @@ def _extract_json_payload(text: str) -> Any:
     return None
 
 
+def _require_user(request: Request) -> SessionUser:
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    user = AUTH.read_session(token)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return user
+
+
+def _require_admin(user: SessionUser = Depends(_require_user)) -> SessionUser:
+    if user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    return user
+
+
+def _current_user_or_none(request: Request) -> Optional[SessionUser]:
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    return AUTH.read_session(token)
+
+
+def _scoped_owner_user_id(user: SessionUser) -> Optional[str]:
+    return None if user.role == "admin" else user.user_id
+
+
+def _derive_role_from_claims(email: str) -> str:
+    email_value = email.strip().lower()
+    admin_emails = {item.strip().lower() for item in os.getenv("AGX_ADMIN_EMAILS", "").split(",") if item.strip()}
+    manager_emails = {item.strip().lower() for item in os.getenv("AGX_MANAGER_EMAILS", "").split(",") if item.strip()}
+    allowed_domains = {item.strip().lower() for item in os.getenv("AGX_ALLOWED_LOGIN_DOMAINS", "").split(",") if item.strip()}
+    if allowed_domains and email_value and "@" in email_value:
+        domain = email_value.split("@", 1)[1]
+        if domain not in allowed_domains:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email domain is not allowed")
+    if email_value in admin_emails:
+        return "admin"
+    if email_value in manager_emails:
+        return "manager"
+    return "developer"
+
+
+def _tenant_for_email(email: str, *, tenant_name: str = ""):
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Email address is required for tenant mapping")
+    domain = email.split("@", 1)[1].strip().lower()
+    if not domain:
+        raise HTTPException(status_code=400, detail="Email domain is required for tenant mapping")
+    return ADMIN_STORE.ensure_tenant(
+        name=tenant_name.strip() or domain.split(".", 1)[0].replace("-", " ").title(),
+        primary_domain=domain,
+        contact_email=email,
+    )
+
+
+def _upsert_external_user(*, provider_name: str, subject: str, email: str, username: str, display_name: str) -> SessionUser:
+    identity = ADMIN_STORE.get_identity(provider_name, subject)
+    if identity is not None:
+        record = ADMIN_STORE.get_user_by_id(identity["user_id"])
+        if record is None:
+            raise HTTPException(status_code=500, detail="Linked user record is missing")
+        return SessionUser(
+            user_id=record.user_id,
+            tenant_id=record.tenant_id or "",
+            tenant_name=record.tenant_name or "",
+            username=record.username,
+            email=record.email,
+            role=record.role,
+            display_name=record.display_name,
+        )
+
+    role = _derive_role_from_claims(email)
+    tenant = _tenant_for_email(email)
+    safe_username = _sanitize_slug(username or email.split("@", 1)[0] or f"{provider_name}_{subject[:8]}")
+    existing = ADMIN_STORE.get_user_by_email(email) or ADMIN_STORE.get_user_by_username(safe_username)
+    if existing is None:
+        record = ADMIN_STORE.create_sso_user(
+            tenant_id=tenant.tenant_id,
+            username=safe_username,
+            email=email,
+            display_name=display_name or safe_username,
+            role=role,
+        )
+    else:
+        record = existing
+    ADMIN_STORE.link_identity(
+        provider=provider_name,
+        subject=subject,
+        user_id=record.user_id,
+        tenant_id=record.tenant_id,
+        email=email,
+        display_name=display_name or safe_username,
+    )
+    return SessionUser(
+        user_id=record.user_id,
+        tenant_id=record.tenant_id or "",
+        tenant_name=record.tenant_name or "",
+        username=record.username,
+        email=record.email,
+        role=record.role,
+        display_name=record.display_name,
+    )
+
+
+def _sanitize_slug(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip().lower()).strip("_")
+    return text or f"agent_{uuid.uuid4().hex[:8]}"
+
+
+def _update_registry_with_slug(slug: str) -> None:
+    AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    registry_path = AGENT_REGISTRY
+    registry_data: Dict[str, Any] = {"agents": []}
+    if registry_path.exists():
+        loaded = _load_manifest(registry_path, validate=False)
+        if isinstance(loaded, dict):
+            registry_data = loaded
+    items = registry_data.get("agents")
+    if not isinstance(items, list):
+        items = []
+    if slug not in items:
+        items.append(slug)
+    registry_data["agents"] = sorted({str(item) for item in items})
+    registry_path.write_text(yaml.safe_dump(registry_data, sort_keys=False))
+
+
+def _collect_package_preview(agent_dir: Path, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    config_value = manifest.get("config_path") or manifest.get("config") or "config.yaml"
+    config_path = (agent_dir / str(config_value)).resolve()
+    config = ProjectConfig.from_file(config_path) if config_path.exists() else None
+    return {
+        "slug": agent_dir.name,
+        "name": manifest.get("name", agent_dir.name),
+        "description": manifest.get("description", ""),
+        "version": manifest.get("version", ""),
+        "inputs": manifest.get("inputs") or [],
+        "outputs": manifest.get("outputs") or [],
+        "capabilities": manifest.get("capabilities") or [],
+        "config_path": str(config_path),
+        "task_count": len(config.tasks) if config else 0,
+        "agent_count": len(config.agents) if config else 0,
+        "tool_count": len(config.tool_specs) if config else 0,
+        "tasks": [task.id for task in config.tasks] if config else [],
+        "agents": list(config.agents.keys()) if config else [],
+        "tools": list(config.tool_specs.keys()) if config else [],
+    }
+
+
+def _safe_extract_zip(upload_path: Path, dest_dir: Path) -> None:
+    with zipfile.ZipFile(upload_path) as archive:
+        for member in archive.infolist():
+            extracted = (dest_dir / member.filename).resolve()
+            if not str(extracted).startswith(str(dest_dir.resolve())):
+                raise HTTPException(status_code=400, detail="Invalid package archive path")
+        archive.extractall(dest_dir)
+
+
+def _find_uploaded_agent_dir(root: Path) -> Path:
+    for candidate in [root] + sorted([item for item in root.rglob("*") if item.is_dir()], key=lambda item: len(item.parts)):
+        if (candidate / "agent.yaml").exists() or (candidate / "agent.yml").exists():
+            return candidate
+    raise HTTPException(status_code=400, detail="Uploaded package is missing agent.yaml")
+
+
+def _package_to_payload(package: PackageRecord) -> Dict[str, Any]:
+    manifest = _load_structured(package.manifest_json) or {}
+    payload = {
+        "package_id": package.package_id,
+        "owner_user_id": package.owner_user_id,
+        "owner_username": package.owner_username,
+        "slug": package.slug,
+        "name": package.name,
+        "version": package.version,
+        "description": package.description,
+        "status": package.status,
+        "config_path": package.config_path,
+        "package_path": package.package_path,
+        "uploaded_at": package.uploaded_at,
+        "updated_at": package.updated_at,
+        "restart_count": package.restart_count,
+        "traffic_count": package.traffic_count,
+        "last_run_at": package.last_run_at,
+        "manifest": manifest,
+    }
+    payload["preview"] = {
+        "inputs": manifest.get("inputs") or [],
+        "outputs": manifest.get("outputs") or [],
+        "capabilities": manifest.get("capabilities") or [],
+    }
+    return payload
+
+
+def _login_redirect_target(next_path: str = "/") -> RedirectResponse:
+    safe_next = next_path if next_path.startswith("/") else "/"
+    return RedirectResponse(url=f"/login?next={safe_next}", status_code=status.HTTP_302_FOUND)
+
+
+def _set_session_cookie(response: Response, user: SessionUser) -> None:
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        AUTH.issue_session(user),
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=AUTH.session_ttl_seconds,
+    )
+
+
+def _ensure_run_access(state: RunState, user: SessionUser, run_id: str) -> None:
+    owner_user_id = _scoped_owner_user_id(user)
+    if owner_user_id is not None and state.owner_user_id != owner_user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run not found: {run_id}")
+
+
+@app.get("/api/auth/me")
+async def auth_me(user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
+    return {
+        "user_id": user.user_id,
+        "tenant_id": user.tenant_id,
+        "tenant_name": user.tenant_name,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "display_name": user.display_name,
+    }
+
+
+@app.get("/api/auth/providers")
+async def auth_providers() -> Dict[str, Any]:
+    cards = visible_provider_cards(OAUTH_PROVIDERS)
+    for item in cards:
+        if item["name"] == "google":
+            if item.get("fedcm_enabled") and (google_id_token is None or GoogleAuthRequest is None):
+                item["fedcm_enabled"] = False
+            if item.get("redirect_enabled") and OAuth is None:
+                item["redirect_enabled"] = False
+            item["enabled"] = bool(item.get("fedcm_enabled") or item.get("redirect_enabled"))
+            if not item["enabled"]:
+                item["reason"] = "Install google-auth for FedCM or configure OAuth redirect with authlib and a Google client secret."
+        elif item.get("flow") == "redirect" and item.get("enabled") and OAuth is None:
+            item["enabled"] = False
+            item["redirect_enabled"] = False
+            item["reason"] = "Install authlib to enable this external identity provider."
+    return {"providers": cards}
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: LoginRequest, response: Response) -> Dict[str, Any]:
+    login_value = payload.username.strip()
+    record = ADMIN_STORE.get_user_by_email(login_value) or ADMIN_STORE.get_user_by_username(login_value)
+    if record is None or not record.active or not AUTH.verify_password(payload.password, record.password_hash, record.salt):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    user = SessionUser(
+        user_id=record.user_id,
+        tenant_id=record.tenant_id or "",
+        tenant_name=record.tenant_name or "",
+        username=record.username,
+        email=record.email,
+        role=record.role,
+        display_name=record.display_name,
+    )
+    _set_session_cookie(response, user)
+    return {
+        "user_id": user.user_id,
+        "tenant_id": user.tenant_id,
+        "tenant_name": user.tenant_name,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "display_name": user.display_name,
+    }
+
+
+@app.post("/api/auth/google/fedcm")
+async def auth_google_fedcm(payload: GoogleFedCMLoginRequest, response: Response) -> Dict[str, Any]:
+    provider = OAUTH_PROVIDERS.get("google")
+    if provider is None:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured on this AGX deployment.")
+    if google_id_token is None or GoogleAuthRequest is None:
+        raise HTTPException(status_code=503, detail="Google FedCM requires the google-auth package.")
+    credential = payload.credential.strip()
+    if not credential:
+        raise HTTPException(status_code=400, detail="Google credential is required")
+    try:
+        claims = google_id_token.verify_oauth2_token(credential, GoogleAuthRequest(), provider.client_id)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid Google credential: {exc}") from exc
+
+    email = str(claims.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account did not provide an email address")
+    if not claims.get("email_verified"):
+        raise HTTPException(status_code=403, detail="Google account email is not verified")
+    subject = str(claims.get("sub") or "").strip()
+    if not subject:
+        raise HTTPException(status_code=400, detail="Google account did not provide a stable subject")
+
+    user = _upsert_external_user(
+        provider_name="google",
+        subject=subject,
+        email=email,
+        username=str(claims.get("email") or email).split("@", 1)[0],
+        display_name=str(claims.get("name") or claims.get("given_name") or email.split("@", 1)[0]),
+    )
+    _set_session_cookie(response, user)
+    return {
+        "user_id": user.user_id,
+        "tenant_id": user.tenant_id,
+        "tenant_name": user.tenant_name,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "display_name": user.display_name,
+        "provider": "google",
+        "select_by": payload.select_by or "",
+    }
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(response: Response) -> Dict[str, Any]:
+    response.delete_cookie(AUTH_COOKIE_NAME)
+    return {"ok": True}
+
+
+@app.get("/auth/oauth/{provider_name}/login")
+async def oauth_login(provider_name: str, request: Request):
+    if OAUTH is None:
+        raise HTTPException(status_code=503, detail="External auth support requires authlib")
+    provider = OAUTH_PROVIDERS.get(provider_name)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_name}")
+    request.session["oauth_next"] = request.query_params.get("next", "/admin")
+    client = OAUTH.create_client(provider_name)
+    redirect_uri = request.url_for("oauth_callback", provider_name=provider_name)
+    return await client.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/auth/oauth/{provider_name}/callback", name="oauth_callback")
+async def oauth_callback(provider_name: str, request: Request):
+    if OAUTH is None:
+        raise HTTPException(status_code=503, detail="External auth support requires authlib")
+    provider = OAUTH_PROVIDERS.get(provider_name)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_name}")
+    client = OAUTH.create_client(provider_name)
+    token = await client.authorize_access_token(request)
+    if provider.kind == "oidc":
+        userinfo = token.get("userinfo") or await client.userinfo(token=token)
+        email = str(userinfo.get("email") or "").strip().lower()
+        subject = str(userinfo.get("sub") or email or "")
+        username = str(userinfo.get("preferred_username") or email.split("@", 1)[0] or subject)
+        display_name = str(userinfo.get("name") or userinfo.get("preferred_username") or username)
+    else:
+        user_resp = await client.get("user", token=token)
+        profile = user_resp.json()
+        email = str(profile.get("email") or "").strip().lower()
+        if not email:
+            email_resp = await client.get("user/emails", token=token)
+            emails = email_resp.json()
+            if isinstance(emails, list):
+                primary = next((item for item in emails if isinstance(item, dict) and item.get("primary")), None)
+                if isinstance(primary, dict):
+                    email = str(primary.get("email") or "").strip().lower()
+                elif emails and isinstance(emails[0], dict):
+                    email = str(emails[0].get("email") or "").strip().lower()
+        subject = str(profile.get("id") or profile.get("node_id") or email or "")
+        username = str(profile.get("login") or email.split("@", 1)[0] or subject)
+        display_name = str(profile.get("name") or profile.get("login") or username)
+    if not subject:
+        raise HTTPException(status_code=400, detail="Provider did not return a stable subject")
+    user = _upsert_external_user(
+        provider_name=provider_name,
+        subject=subject,
+        email=email,
+        username=username,
+        display_name=display_name,
+    )
+    next_url = str(request.session.pop("oauth_next", "/admin"))
+    redirect = RedirectResponse(url=(next_url if next_url.startswith("/") else "/admin"), status_code=status.HTTP_302_FOUND)
+    _set_session_cookie(redirect, user)
+    return redirect
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(_: SessionUser = Depends(_require_admin)) -> Dict[str, Any]:
+    users = [
+        {
+            "user_id": item.user_id,
+            "tenant_id": item.tenant_id,
+            "tenant_name": item.tenant_name,
+            "username": item.username,
+            "email": item.email,
+            "display_name": item.display_name,
+            "role": item.role,
+            "created_at": item.created_at,
+            "active": item.active,
+        }
+        for item in ADMIN_STORE.list_users()
+    ]
+    return {"users": users}
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(payload: CreateUserRequest, _: SessionUser = Depends(_require_admin)) -> Dict[str, Any]:
+    username = payload.username.strip()
+    email = payload.email.strip().lower()
+    if ADMIN_STORE.get_user_by_username(username) is not None:
+        raise HTTPException(status_code=409, detail="Username already exists")
+    if ADMIN_STORE.get_user_by_email(email) is not None:
+        raise HTTPException(status_code=409, detail="Email already exists")
+    tenant = _tenant_for_email(email, tenant_name=payload.tenant_name or "")
+    password_hash, salt = AUTH.hash_password(payload.password)
+    record = ADMIN_STORE.create_user(
+        tenant_id=tenant.tenant_id,
+        username=username,
+        email=email,
+        display_name=(payload.display_name or payload.username).strip(),
+        role=payload.role.strip().lower() or "developer",
+        password_hash=password_hash,
+        salt=salt,
+    )
+    return {
+        "user_id": record.user_id,
+        "tenant_id": record.tenant_id,
+        "tenant_name": record.tenant_name,
+        "username": record.username,
+        "email": record.email,
+        "display_name": record.display_name,
+        "role": record.role,
+        "created_at": record.created_at,
+    }
+
+
+@app.get("/login")
+async def login_page() -> FileResponse:
+    if not LOGIN_HTML.exists():
+        raise HTTPException(status_code=500, detail="Login UI not found")
+    return FileResponse(LOGIN_HTML)
+
+
 @app.get("/")
-async def root() -> FileResponse:
+async def root(request: Request):
+    if _current_user_or_none(request) is None:
+        return _login_redirect_target("/")
     if not INDEX_HTML.exists():
         raise HTTPException(status_code=500, detail="UI not found")
     return FileResponse(INDEX_HTML)
 
 
 @app.get("/admin")
-async def admin_page() -> FileResponse:
+async def admin_page(request: Request):
+    if _current_user_or_none(request) is None:
+        return _login_redirect_target("/admin")
     if not ADMIN_HTML.exists():
         raise HTTPException(status_code=500, detail="Admin UI not found")
     return FileResponse(ADMIN_HTML)
 
 
 @app.post("/api/run")
-async def start_run(request: RunRequest) -> Dict[str, Any]:
+async def start_run(request: RunRequest, owner: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
   print(f"[server] /api/run called with config_path={request.config_path} engine={request.engine}")
   config_path = Path(request.config_path)
   if not config_path.exists():
@@ -421,6 +929,8 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
       config=config,
       engine=request.engine,
       config_path=resolved_path,
+      owner_user_id=owner.user_id,
+      owner_username=owner.username,
       requested_path=request.config_path,
       total_tasks=len(config.tasks),
       completed_tasks=0,
@@ -431,6 +941,8 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
         run_id=run_id,
         project=config.name,
         engine=request.engine,
+        owner_user_id=owner.user_id,
+        owner_username=owner.username,
         config_path=resolved_path,
         requested_path=request.config_path,
         total_tasks=len(config.tasks),
@@ -439,15 +951,17 @@ async def start_run(request: RunRequest) -> Dict[str, Any]:
         stop_requested=False,
         started_at=state.started_at,
     )
+  ADMIN_STORE.bump_package_traffic(resolved_path)
   state.task = asyncio.create_task(execute_run(run_id, config, request.engine))
   return {"run_id": run_id, "project": config.name}
 
 
 @app.post("/api/run/{run_id}/stop")
-async def stop_run(run_id: str) -> Dict[str, Any]:
+async def stop_run(run_id: str, user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
     state = RUNS.get(run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    _ensure_run_access(state, user, run_id)
     state.stop_requested = True
     # Unblock any pending human-gated task so execute_run can exit quickly.
     if state.pending_input is not None:
@@ -481,10 +995,11 @@ async def stop_run(run_id: str) -> Dict[str, Any]:
 
 
 @app.post("/api/run/{run_id}/input/{task_id}")
-async def submit_input(run_id: str, task_id: str, payload: InputSubmit) -> Dict[str, Any]:
+async def submit_input(run_id: str, task_id: str, payload: InputSubmit, user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
     state = RUNS.get(run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    _ensure_run_access(state, user, run_id)
     pending = state.pending_input
     if not pending or pending.task_id != task_id:
         raise HTTPException(status_code=409, detail="No pending input for this task")
@@ -531,10 +1046,11 @@ async def submit_input(run_id: str, task_id: str, payload: InputSubmit) -> Dict[
 
 
 @app.post("/api/run/{run_id}/approve/{task_id}")
-async def submit_approval(run_id: str, task_id: str, payload: ApprovalSubmit) -> Dict[str, Any]:
+async def submit_approval(run_id: str, task_id: str, payload: ApprovalSubmit, user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
     state = RUNS.get(run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    _ensure_run_access(state, user, run_id)
     pending = state.pending_approval
     if not pending or pending.task_id != task_id:
         raise HTTPException(status_code=409, detail="No pending approval for this task")
@@ -1150,7 +1666,16 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     if run_id not in RUNS:
         await websocket.close(code=1008)
         return
+    token = websocket.cookies.get(AUTH_COOKIE_NAME, "")
+    user = AUTH.read_session(token)
+    if user is None:
+        await websocket.close(code=1008)
+        return
     state = RUNS[run_id]
+    owner_user_id = _scoped_owner_user_id(user)
+    if owner_user_id is not None and state.owner_user_id != owner_user_id:
+        await websocket.close(code=1008)
+        return
     queue: asyncio.Queue = asyncio.Queue()
     state.subscribers.append(queue)
     await websocket.accept()
@@ -1177,9 +1702,12 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
 
 
 @app.get("/api/runs")
-async def list_runs() -> Dict[str, Any]:
+async def list_runs(user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
     summary = []
+    owner_user_id = _scoped_owner_user_id(user)
     for run_id, state in RUNS.items():
+        if owner_user_id is not None and state.owner_user_id != owner_user_id:
+            continue
         summary.append(_serialize_run_summary(run_id, state))
     return {"runs": summary}
 
@@ -1199,6 +1727,8 @@ def _serialize_run_summary(run_id: str, state: RunState) -> Dict[str, Any]:
         "run_id": run_id,
         "project": state.config.name,
         "engine": state.engine,
+        "owner_user_id": state.owner_user_id,
+        "owner_username": state.owner_username,
         "completed": state.completed,
         "progress": progress,
         "tasks_total": state.total_tasks,
@@ -1290,9 +1820,13 @@ async def admin_list_runs(
     event_type: str = "",
     completed: str = "",
     limit: int = 200,
+    user: SessionUser = Depends(_require_user),
 ) -> Dict[str, Any]:
     runs = [_serialize_run_summary(item_id, state) for item_id, state in RUNS.items()]
     runs.extend(_load_orphan_run_dirs())
+    owner_user_id = _scoped_owner_user_id(user)
+    if owner_user_id is not None:
+        runs = [item for item in runs if item.get("owner_user_id") == owner_user_id]
     completed_filter: Optional[bool] = None
     completed_text = completed.strip().lower()
     if completed_text in {"true", "1", "yes", "completed"}:
@@ -1327,12 +1861,16 @@ async def admin_list_run_events(
     q: str = "",
     limit: int = 500,
     offset: int = 0,
+    user: SessionUser = Depends(_require_user),
 ) -> Dict[str, Any]:
     state = RUNS.get(run_id)
     if state is None:
         if _run_dir(run_id).exists():
             return {"run_id": run_id, "events": [], "total": 0, "event_types": []}
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    owner_user_id = _scoped_owner_user_id(user)
+    if owner_user_id is not None and state.owner_user_id != owner_user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run not found: {run_id}")
     items = list(state.history)
     event_filter = event_type.strip().lower()
     query = q.strip().lower()
@@ -1365,8 +1903,11 @@ async def admin_list_run_events(
 
 
 @app.delete("/api/admin/runs/{run_id}")
-async def admin_delete_run(run_id: str) -> Dict[str, Any]:
+async def admin_delete_run(run_id: str, user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
     state = RUNS.get(run_id)
+    owner_user_id = _scoped_owner_user_id(user)
+    if state is not None and owner_user_id is not None and state.owner_user_id != owner_user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run not found: {run_id}")
     if state is not None and state.task is not None and not state.task.done() and not state.completed:
         raise HTTPException(status_code=409, detail="Cannot delete an active run")
 
@@ -1397,3 +1938,60 @@ async def admin_delete_run(run_id: str) -> Dict[str, Any]:
         "deleted_store": deleted_store,
         "deleted_artifacts": had_artifacts,
     }
+
+
+@app.get("/api/admin/packages")
+async def admin_list_packages(user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
+    owner_user_id = _scoped_owner_user_id(user)
+    packages = [_package_to_payload(item) for item in ADMIN_STORE.list_packages(owner_user_id)]
+    return {"packages": packages}
+
+
+@app.post("/api/admin/packages/upload")
+async def admin_upload_package(
+    package: UploadFile = File(...),
+    user: SessionUser = Depends(_require_user),
+) -> Dict[str, Any]:
+    if not package.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Only .zip agent packages are supported")
+    AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="agx_upload_") as tmpdir:
+        tmp_root = Path(tmpdir)
+        upload_path = tmp_root / package.filename
+        upload_path.write_bytes(await package.read())
+        extract_dir = tmp_root / "extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        _safe_extract_zip(upload_path, extract_dir)
+        agent_dir = _find_uploaded_agent_dir(extract_dir)
+        manifest_path = agent_dir / "agent.yaml"
+        if not manifest_path.exists():
+            manifest_path = agent_dir / "agent.yml"
+        manifest = _load_manifest(manifest_path)
+        if not manifest:
+            raise HTTPException(status_code=400, detail="Invalid agent manifest")
+        slug = _sanitize_slug(str(manifest.get("id") or agent_dir.name))
+        existing = ADMIN_STORE.get_package_by_slug(slug)
+        if existing is not None and user.role != "admin" and existing.owner_user_id != user.user_id:
+            raise HTTPException(status_code=403, detail="This agent slug is owned by another user")
+        target_dir = AGENTS_DIR / slug
+        restarted = target_dir.exists()
+        if restarted:
+            shutil.rmtree(target_dir)
+        shutil.copytree(agent_dir, target_dir)
+        _update_registry_with_slug(slug)
+        preview = _collect_package_preview(target_dir, manifest)
+        stored = ADMIN_STORE.upsert_package(
+            owner_user_id=user.user_id,
+            owner_username=user.username,
+            slug=slug,
+            name=str(preview["name"]),
+            version=str(preview["version"]),
+            description=str(preview["description"]),
+            manifest=manifest,
+            config_path=str(preview["config_path"]),
+            package_path=str(target_dir),
+            restarted=restarted,
+        )
+    payload = _package_to_payload(stored)
+    payload["preview"] = preview
+    return payload
