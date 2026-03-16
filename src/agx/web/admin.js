@@ -11,7 +11,6 @@ const adminState = {
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindAdminEvents();
-  fetchMeta();
   loadAuthProviders();
   await restoreSession();
 });
@@ -176,15 +175,6 @@ function setActiveTab(tabName) {
   document.querySelectorAll('[data-admin-panel]').forEach((panel) => {
     panel.classList.toggle('d-none', panel.dataset.adminPanel !== tabName);
   });
-}
-
-function fetchMeta() {
-  fetch('/api/meta')
-    .then((res) => res.ok ? res.json() : null)
-    .then((data) => {
-      if (data && data.version) textSet('admin-version', `v${data.version}`);
-    })
-    .catch(() => {});
 }
 
 async function loadRuns() {

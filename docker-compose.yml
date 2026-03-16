@@ -1,0 +1,72 @@
+services:
+  agx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agx-framework
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      AGX_AUTH_SECRET: ${AGX_AUTH_SECRET:-change-me}
+      AGX_BOOTSTRAP_USERS: '${AGX_BOOTSTRAP_USERS:-[{"tenant_name":"Emerson","tenant_domain":"emerson.com","username":"admin","email":"admin@emerson.com","password":"change-me","role":"admin","display_name":"Marketplace Admin"}]}'
+      AGX_DB_URL: postgresql://postgres:postgres@postgres:5432/agx
+      AGX_ADMIN_DB_PATH: /data/admin/admin.db
+      AGX_RABBITMQ_ENABLED: "true"
+      AGX_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      AGX_RABBITMQ_EXCHANGE: agx.events
+      AGX_RABBITMQ_ROUTING_PREFIX: agx
+      AGX_AGENTS_DIR: /data/agents
+      AGX_AGENT_REGISTRY: /data/registry/agents.yaml
+      AGX_RUNS_DIR: /data/runs
+    volumes:
+      - ./agents:/data/agents:rw
+      - ./agents/agents.yaml:/data/registry/agents.yaml:rw
+      - agx-runs:/data/runs
+      - agx-admin:/data/admin
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: agx-postgres
+    environment:
+      POSTGRES_DB: agx
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agx"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: agx-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
+  agx-runs:
+  agx-admin:

@@ -10,6 +10,34 @@ pip install --upgrade pip
 pip install -e .
 ```
 
+## Run with Docker
+
+The repo now includes:
+
+- [Dockerfile](/home/administrator/source/Agents/Dockerfile) for the AGX runtime
+- [docker-compose.yml](/home/administrator/source/Agents/docker-compose.yml) for AGX + Postgres + RabbitMQ
+- [.env.docker.example](/home/administrator/source/Agents/.env.docker.example) for compose-time secrets/bootstrap users
+
+Start the full stack:
+
+```bash
+cp .env.docker.example .env
+docker compose up --build
+```
+
+Endpoints:
+
+- AGX web UI: `http://localhost:8000`
+- RabbitMQ management: `http://localhost:15672`
+- Postgres: `localhost:5432`
+
+Compose wiring:
+
+- AGX uses `postgres` as the Postgres host
+- AGX uses `rabbitmq` as the RabbitMQ host
+- agent packages are mounted from the repo `agents/` directory into `/data/agents`
+- run artifacts and admin DB are stored in Docker volumes
+
 If you already have an existing virtualenv such as `agentenv`, rerun:
 
 ```bash

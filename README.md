@@ -112,6 +112,8 @@ Installation and environment setup are documented separately:
 
 `FrameworkInstallation.md`
 
+For containerized deployment, the repo includes [Dockerfile](/home/administrator/source/Agents/Dockerfile), [docker-compose.yml](/home/administrator/source/Agents/docker-compose.yml), and [.env.docker.example](/home/administrator/source/Agents/.env.docker.example) to run AGX with Postgres and RabbitMQ.
+
 ## Project layout
 
 ```

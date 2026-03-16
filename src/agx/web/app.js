@@ -164,7 +164,6 @@ window.addEventListener("unhandledrejection", (e) => {
 
 document.addEventListener("DOMContentLoaded", () => {
   state.logEl = null;
-  fetchMeta();
   initializeRunner();
 });
 
@@ -199,19 +198,6 @@ function bindLogout() {
     await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     window.location.replace('/login?next=/');
   };
-}
-
-function fetchMeta() {
-  const el = document.getElementById('app-version');
-  if (!el) return;
-  fetch('/api/meta')
-    .then(res => res.ok ? res.json() : null)
-    .then(data => {
-      if (data && data.version) {
-        el.textContent = `v${data.version}`;
-      }
-    })
-    .catch(() => {});
 }
 
 function renderConfigCards(agents) {

@@ -12,7 +12,10 @@
     <div class="container login-shell">
       <div class="login-card">
         <div class="login-brand">
-          <div class="login-kicker">AGX Runtime</div>
+          <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
+            <div class="login-kicker mb-0">AGX Runtime</div>
+            <span class="badge bg-dark text-light" data-agx-version>v0.0.0</span>
+          </div>
           <h1 class="login-title">Sign in</h1>
           <p class="login-subtitle">Authenticate once and use both the AGX runner and admin sections with the same FastAPI session.</p>
         </div>
@@ -48,6 +51,7 @@
       </div>
     </div>
 
+    <script src="/static/site.js?v=1"></script>
     <script src="/static/login.js?v=1"></script>
   </body>
 </html>
