@@ -208,3 +208,12 @@ class PostgresRunStore:
                 except Exception:
                     continue
         return events
+
+    def delete_run(self, run_id: str) -> bool:
+        with self._connect() as conn:
+            deleted = conn.execute(
+                "DELETE FROM agx_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            conn.commit()
+        return bool(deleted.rowcount)

@@ -19,4 +19,3 @@ def test_agent_initialization():
     assert agent.tools == {}
     assert agent.planning.max_iterations == 3
     assert isinstance(agent.memory, ConversationBufferMemory)
-"""

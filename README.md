@@ -140,6 +140,141 @@ Installation and environment setup are documented separately:
     └── configs             # YAML configs per domain
 ```
 
+## Runtime data and log cleanup
+
+AGX currently stores run history in three places:
+
+- `.agx/runs/<run_id>/` for per-run manifests and artifacts created by the web runner.
+- `.agx/task_state.db` for local SQLite task state used by the task runners.
+- Postgres tables `agx_runs` and `agx_run_events` when `AGX_DB_URL` is configured.
+
+There is no built-in retention or delete command yet. To remove old local run logs, delete the relevant run folders under:
+
+```bash
+rm -rf .agx/runs/<run_id>
+```
+
+To remove all local run artifacts:
+
+```bash
+rm -rf .agx/runs
+```
+
+To reset local task state as well:
+
+```bash
+rm -f .agx/task_state.db
+```
+
+If Postgres persistence is enabled, you must also delete the matching rows from `agx_runs` and `agx_run_events`; removing `.agx/runs` alone does not clear database-backed history.
+
+## Runtime boundary
+
+The runtime should not assume that agent packages, workflows, or their tests live inside the framework source tree.
+
+- The framework code lives under `src/agx`.
+- Agent packages and workflow YAML can live in any directory exposed through `AGX_AGENTS_DIR`.
+- The agent registry file can live anywhere via `AGX_AGENT_REGISTRY`.
+- Run artifacts can be redirected outside the repo via `AGX_RUNS_DIR`.
+- Framework tests should validate runtime contracts only; agent-specific workflow tests should live with the agent pack, not in the core runtime suite.
+
+The repo-local `agents/` folder is now just the default workspace convention, not a framework requirement.
+
+## Architecture
+
+AGX is split into a reusable runtime/framework layer and a set of separately packaged agent definitions inside the same workspace.
+
+### High-level component map
+
+```text
+Agentic Workspace
+|
++- AGX framework package (src/agx)
+|  |
+|  +- Config loader
+|  |  - parses YAML project configs into ProjectConfig / AgentSpec / TaskSpec
+|  |
+|  +- Orchestration engines
+|  |  - legacy engine: agx.agents.orchestrator.Orchestrator
+|  |  - autogen engine: agx.autogen_runner.AutogenOrchestrator
+|  |
+|  +- Agent runtime
+|  |  - agent base classes and planning loop
+|  |  - task ordering and execution
+|  |  - handoff/binding resolution between tasks
+|  |
+|  +- Tooling layer
+|  |  - Tool protocol
+|  |  - ToolRegistry
+|  |  - built-in tool implementations
+|  |
+|  +- LLM and memory abstractions
+|  |  - provider interface and implementations
+|  |  - conversation memory
+|  |
+|  +- Runtime integrations
+|  |  - RabbitMQ event publishing
+|  |  - OpenTelemetry spans/events
+|  |
+|  +- Persistence and interfaces
+|  |  - SQLite task state
+|  |  - Postgres run/event store
+|  |  - CLI
+|  |  - FastAPI web server + WebSocket UI
+|  |
+|  +- Packaging
+|     - Python package metadata and dependencies in pyproject.toml
+|
++- Agent packages (agents/*)
+|  |
+|  +- registry files
+|  |  - agents/agents.yaml
+|  |  - agents/registry.yaml
+|  |
+|  +- per-agent package folders
+|     - agent.yaml manifest for discovery/UI metadata
+|     - config.yaml workflow definition
+|     - optional assets/docs such as flow.md or icons
+|
++- External systems
+   |
+   +- LLM backends
+   +- RabbitMQ
+   +- OpenTelemetry collectors
+   +- Postgres
+   +- host OS tools invoked by built-in tools
+```
+
+### Framework vs agent separation
+
+The separation is real, but not absolute:
+
+- Agents are mostly data packages: manifests in `agent.yaml`, workflows in `config.yaml`, and optional assets.
+- The framework discovers those packages through `agents/agents.yaml` or `agents/registry.yaml`, validates manifests, loads configs, and executes them.
+- Agent configs depend on framework contracts: task schema, tool names, import-path conventions, task types such as `tool_run` or `agent_handoff`, and runtime features such as approvals and bindings.
+- The framework can run without any particular sample agent package. An individual agent package cannot run without the AGX runtime because its config semantics are defined by AGX.
+- A stronger separation is possible later by moving agent packs into separate repos or distributable packages, but today they are co-located in one workspace and coupled by configuration/runtime contracts rather than by much custom Python code.
+
+### Workspace configuration
+
+The web runtime resolves workspace paths from environment variables first:
+
+- `AGX_AGENTS_DIR`: root directory containing agent packages
+- `AGX_AGENT_REGISTRY`: registry YAML listing discoverable agents
+- `AGX_RUNS_DIR`: run artifact root
+
+If unset, AGX falls back to the current repo-local convention for developer convenience.
+
+### Current runtime flow
+
+1. The web UI or CLI selects an agent config file.
+2. `ProjectConfig` loads YAML into typed agent/task/tool specs.
+3. The selected engine builds the execution graph and resolves dependencies.
+4. The runtime registers built-in and configured tools.
+5. Tasks execute, optionally pausing for human input or approval.
+6. Events stream to the UI, optional middleware, and optional Postgres persistence.
+7. Run artifacts are written under `.agx/runs/<run_id>/artifacts`.
+
 ## LLM output contract
 
 The default planning loop expects every model turn to return JSON with the following shape:

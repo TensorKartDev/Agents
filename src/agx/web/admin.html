@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AGX Admin</title>
+    <link href="/static/bootstrap.css" rel="stylesheet" />
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+    <link href="/static/app.css" rel="stylesheet" />
+  </head>
+  <body class="py-4">
+    <div class="container">
+      <div class="glass-card p-4 mb-4">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+          <div>
+            <h1 class="display-6 fw-bold neon mb-1"><i class="bi bi-shield-lock"></i> AGX Run Admin</h1>
+            <p class="text-secondary mb-0">Inspect persisted run history and delete stale runs</p>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <a href="/" class="btn btn-outline-dark btn-sm"><i class="bi bi-arrow-left"></i> Runner</a>
+            <span class="badge bg-dark text-light" id="admin-version">v0.0.0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="glass-card p-4 mb-4">
+        <div class="row g-3 align-items-end">
+          <div class="col-12 col-md-3">
+            <label for="filter-run-id" class="form-label small text-uppercase text-secondary">Run ID</label>
+            <input id="filter-run-id" class="form-control" type="text" placeholder="Contains run id" />
+          </div>
+          <div class="col-12 col-md-3">
+            <label for="filter-project" class="form-label small text-uppercase text-secondary">Project</label>
+            <input id="filter-project" class="form-control" type="text" placeholder="Contains project" />
+          </div>
+          <div class="col-12 col-md-2">
+            <label for="filter-engine" class="form-label small text-uppercase text-secondary">Engine</label>
+            <select id="filter-engine" class="form-select">
+              <option value="">All</option>
+              <option value="autogen">autogen</option>
+              <option value="legacy">legacy</option>
+              <option value="unknown">unknown</option>
+            </select>
+          </div>
+          <div class="col-12 col-md-2">
+            <label for="filter-completed" class="form-label small text-uppercase text-secondary">Status</label>
+            <select id="filter-completed" class="form-select">
+              <option value="">All</option>
+              <option value="false">Active</option>
+              <option value="true">Completed</option>
+            </select>
+          </div>
+          <div class="col-12 col-md-2 d-grid">
+            <button id="runs-refresh" class="btn btn-primary"><i class="bi bi-arrow-repeat"></i> Refresh</button>
+          </div>
+        </div>
+        <div class="small text-secondary mt-3" id="runs-summary">Loading run inventory...</div>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-12 col-lg-5">
+          <div class="glass-card p-3 admin-panel">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <div>
+                <h2 class="h5 mb-0 text-info">Runs</h2>
+                <small class="text-secondary">Filter and select a run</small>
+              </div>
+            </div>
+            <div id="admin-run-list" class="admin-list"></div>
+          </div>
+        </div>
+        <div class="col-12 col-lg-7">
+          <div class="glass-card p-3 admin-panel">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+              <div>
+                <h2 class="h5 mb-0 text-info">Events</h2>
+                <small class="text-secondary" id="selected-run-meta">Select a run to inspect events</small>
+              </div>
+              <button id="delete-run" class="btn btn-outline-danger btn-sm" disabled>
+                <i class="bi bi-trash3"></i> Delete Run
+              </button>
+            </div>
+
+            <div class="row g-3 align-items-end mb-3">
+              <div class="col-12 col-md-4">
+                <label for="filter-event-type" class="form-label small text-uppercase text-secondary">Event Type</label>
+                <select id="filter-event-type" class="form-select">
+                  <option value="">All</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-6">
+                <label for="filter-event-query" class="form-label small text-uppercase text-secondary">Search</label>
+                <input id="filter-event-query" class="form-control" type="text" placeholder="Search event payload" />
+              </div>
+              <div class="col-12 col-md-2 d-grid">
+                <button id="events-refresh" class="btn btn-outline-primary" disabled>Filter</button>
+              </div>
+            </div>
+
+            <div class="small text-secondary mb-3" id="events-summary">No run selected.</div>
+            <div id="admin-event-list" class="admin-list admin-events"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/bootstrap.js"></script>
+    <script src="/static/admin.js?v=1"></script>
+  </body>
+</html>

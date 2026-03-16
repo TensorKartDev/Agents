@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import time
 import uuid
 import re
@@ -30,6 +31,7 @@ from ..config import ProjectConfig
 from ..persistence import PostgresRunStore
 from ..runtime.integrations import build_runtime_integrations
 from ..runtime.interoperability import build_handoff_payload, parse_output_text, resolve_bindings
+from ..workspace import resolve_workspace_paths
 from dotenv import load_dotenv
 load_dotenv()
 def _load_structured(text: Any) -> Any:
@@ -94,12 +96,14 @@ from ..tools.base import ToolContext
 app = FastAPI(title="AGX Web Runner")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent), name="static")
 
-BASE_DIR = Path(__file__).resolve().parents[3]  # repo root
-AGENTS_DIR = BASE_DIR / "agents"
-AGENT_REGISTRY = AGENTS_DIR / "agents.yaml"
+WORKSPACE = resolve_workspace_paths()
+BASE_DIR = WORKSPACE.base_dir
+AGENTS_DIR = WORKSPACE.agents_dir
+AGENT_REGISTRY = WORKSPACE.registry_path
 STATIC_IMG = Path(__file__).parent / "img"
 INDEX_HTML = Path(__file__).parent / "index.html"
-RUNS_DIR = BASE_DIR / ".agx" / "runs"
+ADMIN_HTML = Path(__file__).parent / "admin.html"
+RUNS_DIR = WORKSPACE.runs_dir
 
 if AGENTS_DIR.exists():
     # Mount so icons and assets inside agent folders can be served statically.
@@ -184,18 +188,6 @@ def scan_for_agents() -> List[AgentInfo]:
         return agents
 
     registry_path = AGENT_REGISTRY
-    if not registry_path.exists():
-        alt = AGENTS_DIR / "Agents.yaml"
-        if alt.exists():
-            registry_path = alt
-        else:
-            alt = AGENTS_DIR / "Agents.YAML"
-            if alt.exists():
-                registry_path = alt
-            else:
-                alt = AGENTS_DIR / "registry.yaml"
-                if alt.exists():
-                    registry_path = alt
     registry_data = _load_manifest(registry_path, validate=False) if registry_path.exists() else None
     allowed = set(registry_data.get("agents", [])) if registry_data else set()
     if not allowed:
@@ -221,7 +213,7 @@ def scan_for_agents() -> List[AgentInfo]:
         icon_candidate = agent_dir / icon_field if icon_field else None
         icon_path = (
             f"/agents/{agent_dir.name}/{icon_field}"
-            if icon_candidate and icon_candidate.exists()
+            if AGENTS_DIR.exists() and icon_candidate and icon_candidate.exists()
             else "/static/img/robot.svg"
         )
 
@@ -389,6 +381,13 @@ async def root() -> FileResponse:
     if not INDEX_HTML.exists():
         raise HTTPException(status_code=500, detail="UI not found")
     return FileResponse(INDEX_HTML)
+
+
+@app.get("/admin")
+async def admin_page() -> FileResponse:
+    if not ADMIN_HTML.exists():
+        raise HTTPException(status_code=500, detail="Admin UI not found")
+    return FileResponse(ADMIN_HTML)
 
 
 @app.post("/api/run")
@@ -1181,21 +1180,220 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
 async def list_runs() -> Dict[str, Any]:
     summary = []
     for run_id, state in RUNS.items():
-        progress = 0
-        if state.total_tasks:
-            progress = int((state.completed_tasks / state.total_tasks) * 100)
-        summary.append(
+        summary.append(_serialize_run_summary(run_id, state))
+    return {"runs": summary}
+
+
+def _serialize_run_summary(run_id: str, state: RunState) -> Dict[str, Any]:
+    progress = 0
+    if state.total_tasks:
+        progress = int((state.completed_tasks / state.total_tasks) * 100)
+    event_types = sorted(
+        {
+            str(event.get("type"))
+            for event in state.history
+            if isinstance(event, dict) and event.get("type") is not None
+        }
+    )
+    return {
+        "run_id": run_id,
+        "project": state.config.name,
+        "engine": state.engine,
+        "completed": state.completed,
+        "progress": progress,
+        "tasks_total": state.total_tasks,
+        "tasks_completed": state.completed_tasks,
+        "started_at": state.started_at,
+        "config_path": state.config_path,
+        "request_path": state.requested_path or state.config_path,
+        "event_count": len(state.history),
+        "event_types": event_types,
+        "has_artifacts": _run_dir(run_id).exists(),
+        "source": "runtime",
+    }
+
+
+def _load_orphan_run_dirs() -> List[Dict[str, Any]]:
+    orphan_runs: List[Dict[str, Any]] = []
+    if not RUNS_DIR.exists():
+        return orphan_runs
+    known = set(RUNS.keys())
+    for path in sorted(RUNS_DIR.iterdir(), key=lambda item: item.name):
+        if not path.is_dir() or path.name in known:
+            continue
+        manifest = _manifest_path(path.name)
+        created_at = path.stat().st_mtime
+        if manifest.exists():
+            try:
+                data = json.loads(manifest.read_text())
+                created_text = data.get("created_at")
+                if isinstance(created_text, str):
+                    created_at = time.mktime(time.strptime(created_text, "%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:
+                pass
+        orphan_runs.append(
             {
-                "run_id": run_id,
-                "project": state.config.name,
-                "engine": state.engine,
-                "completed": state.completed,
-                "progress": progress,
-                "tasks_total": state.total_tasks,
-                "tasks_completed": state.completed_tasks,
-                "started_at": state.started_at,
-                "config_path": state.config_path,
-                "request_path": state.requested_path or state.config_path,
+                "run_id": path.name,
+                "project": "(artifacts only)",
+                "engine": "unknown",
+                "completed": True,
+                "progress": 0,
+                "tasks_total": 0,
+                "tasks_completed": 0,
+                "started_at": created_at,
+                "config_path": "",
+                "request_path": "",
+                "event_count": 0,
+                "event_types": [],
+                "has_artifacts": True,
+                "source": "artifacts",
             }
         )
-    return {"runs": summary}
+    return orphan_runs
+
+
+def _apply_run_filters(
+    runs: List[Dict[str, Any]],
+    *,
+    run_id: str = "",
+    project: str = "",
+    engine: str = "",
+    event_type: str = "",
+    completed: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    filtered = []
+    run_id = run_id.strip().lower()
+    project = project.strip().lower()
+    engine = engine.strip().lower()
+    event_type = event_type.strip().lower()
+    for item in runs:
+        if run_id and run_id not in str(item.get("run_id", "")).lower():
+            continue
+        if project and project not in str(item.get("project", "")).lower():
+            continue
+        if engine and engine != str(item.get("engine", "")).lower():
+            continue
+        if completed is not None and bool(item.get("completed")) is not completed:
+            continue
+        event_types = [str(value).lower() for value in item.get("event_types", [])]
+        if event_type and event_type not in event_types:
+            continue
+        filtered.append(item)
+    return filtered
+
+
+@app.get("/api/admin/runs")
+async def admin_list_runs(
+    run_id: str = "",
+    project: str = "",
+    engine: str = "",
+    event_type: str = "",
+    completed: str = "",
+    limit: int = 200,
+) -> Dict[str, Any]:
+    runs = [_serialize_run_summary(item_id, state) for item_id, state in RUNS.items()]
+    runs.extend(_load_orphan_run_dirs())
+    completed_filter: Optional[bool] = None
+    completed_text = completed.strip().lower()
+    if completed_text in {"true", "1", "yes", "completed"}:
+        completed_filter = True
+    elif completed_text in {"false", "0", "no", "active"}:
+        completed_filter = False
+    runs = _apply_run_filters(
+        runs,
+        run_id=run_id,
+        project=project,
+        engine=engine,
+        event_type=event_type,
+        completed=completed_filter,
+    )
+    runs.sort(key=lambda item: float(item.get("started_at") or 0), reverse=True)
+    trimmed = runs[: max(1, min(limit, 1000))]
+    event_types = sorted(
+        {
+            value
+            for item in runs
+            for value in item.get("event_types", [])
+            if isinstance(value, str) and value
+        }
+    )
+    return {"runs": trimmed, "total": len(runs), "event_types": event_types}
+
+
+@app.get("/api/admin/runs/{run_id}/events")
+async def admin_list_run_events(
+    run_id: str,
+    event_type: str = "",
+    q: str = "",
+    limit: int = 500,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    state = RUNS.get(run_id)
+    if state is None:
+        if _run_dir(run_id).exists():
+            return {"run_id": run_id, "events": [], "total": 0, "event_types": []}
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    items = list(state.history)
+    event_filter = event_type.strip().lower()
+    query = q.strip().lower()
+    filtered: List[Dict[str, Any]] = []
+    for event in items:
+        if not isinstance(event, dict):
+            continue
+        if event_filter and str(event.get("type", "")).lower() != event_filter:
+            continue
+        if query:
+            haystack = json.dumps(event, default=str).lower()
+            if query not in haystack:
+                continue
+        filtered.append(event)
+    all_types = sorted(
+        {
+            str(event.get("type"))
+            for event in items
+            if isinstance(event, dict) and event.get("type") is not None
+        }
+    )
+    safe_offset = max(0, offset)
+    safe_limit = max(1, min(limit, 2000))
+    return {
+        "run_id": run_id,
+        "events": filtered[safe_offset:safe_offset + safe_limit],
+        "total": len(filtered),
+        "event_types": all_types,
+    }
+
+
+@app.delete("/api/admin/runs/{run_id}")
+async def admin_delete_run(run_id: str) -> Dict[str, Any]:
+    state = RUNS.get(run_id)
+    if state is not None and state.task is not None and not state.task.done() and not state.completed:
+        raise HTTPException(status_code=409, detail="Cannot delete an active run")
+
+    run_dir = _run_dir(run_id)
+    had_artifacts = run_dir.exists()
+    deleted_store = False
+    if RUN_STORE is not None:
+        try:
+            deleted_store = RUN_STORE.delete_run(run_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to delete persisted run: {exc}") from exc
+
+    if state is not None:
+        RUNS.pop(run_id, None)
+
+    if had_artifacts:
+        try:
+            shutil.rmtree(run_dir)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to delete run artifacts: {exc}") from exc
+
+    if state is None and not deleted_store and not had_artifacts:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+
+    return {
+        "run_id": run_id,
+        "deleted": True,
+        "deleted_store": deleted_store,
+        "deleted_artifacts": had_artifacts,
+    }
