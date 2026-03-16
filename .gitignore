@@ -21,7 +21,8 @@ dist/
 # Test/coverage caches
 .pytest_cache/
 .mypy_cache/
-
+src/agx/web/.env
+!src/agx/web/sample.env
 # Local data
 *.log
 *.tmp
@@ -30,4 +31,3 @@ meta/
 artifacts/*
 extractions/*   
 *.hex.png
-.env
