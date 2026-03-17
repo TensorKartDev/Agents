@@ -106,13 +106,62 @@ agents:
 
 Once registered, your agent appears in the Admin Web UI and CLI for the entire org. The framework enforces consistent orchestration, approvals, and artifacts while you focus on capability.
 
+
+## Running AGX with Docker
+
+You can run AGX and its dependencies (Postgres, RabbitMQ) using Docker for easy setup and deployment. The repository provides a `Dockerfile` and a `docker-compose.yml` for this purpose.
+
+### 1. Prepare your environment file
+
+Copy the sample environment file to `.env` in the project root:
+
+```bash
+cp src/agx/web/sample.env .env
+```
+
+Edit `.env` as needed to set your database credentials, secrets, and bootstrap users. See comments in the file for details.
+
+### 2. Start the containers
+
+Run the following command to build and start AGX, Postgres, and RabbitMQ:
+
+```bash
+docker-compose up --build
+```
+
+This will launch all services defined in `docker-compose.yml`.
+
+### 3. Access the AGX web dashboard
+
+Once the containers are running, open your browser to:
+
+```
+http://localhost:8000
+```
+
+You can now use the AGX web UI, register agents, and run workflows.
+
+### 4. Stopping the containers
+
+To stop all running containers:
+
+```bash
+docker-compose down
+```
+
+---
+
+For more advanced configuration, see `FrameworkInstallation.md` and the comments in `docker-compose.yml`.
+
+---
+
 ## Installation
 
 Installation and environment setup are documented separately:
 
 `FrameworkInstallation.md`
 
-For containerized deployment, the repo includes [Dockerfile](/home/administrator/source/Agents/Dockerfile), [docker-compose.yml](/home/administrator/source/Agents/docker-compose.yml), and [.env.docker.example](/home/administrator/source/Agents/.env.docker.example) to run AGX with Postgres and RabbitMQ.
+For manual or non-containerized deployment, see the instructions above and in the referenced documentation.
 
 ## Project layout
 
