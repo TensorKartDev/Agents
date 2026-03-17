@@ -223,6 +223,7 @@ AGX supports external login so agent developers can reuse existing identities:
 
 - Google via FedCM-backed Google Identity Services
 - GitHub via OAuth
+- Okta via OIDC
 
 The runtime auto-provisions AGX users from the external identity and assigns roles based on email allowlists:
 

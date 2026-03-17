@@ -62,6 +62,20 @@ And register your AGX origin in the Google Cloud OAuth client configuration, for
 - Authorized JavaScript origin: `http://localhost:8000`
 - Redirect URI for legacy fallback: `http://localhost:8000/auth/oauth/google/callback`
 
+For Okta sign-in, configure:
+
+- `AGX_OKTA_CLIENT_ID`
+- `AGX_OKTA_CLIENT_SECRET`
+- `AGX_OKTA_ISSUER`
+
+Example issuer:
+
+- `https://your-org.okta.com/oauth2/default`
+
+Register this redirect URI in Okta:
+
+- `http://localhost:8000/auth/oauth/okta/callback`
+
 ## Run an example scenario
 
 ```bash

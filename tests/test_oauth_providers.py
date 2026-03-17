@@ -6,13 +6,18 @@ def test_load_oauth_providers_from_env(monkeypatch):
     monkeypatch.setenv("AGX_GOOGLE_CLIENT_SECRET", "gsecret")
     monkeypatch.setenv("AGX_GITHUB_CLIENT_ID", "ghid")
     monkeypatch.setenv("AGX_GITHUB_CLIENT_SECRET", "ghsecret")
+    monkeypatch.setenv("AGX_OKTA_CLIENT_ID", "oktaid")
+    monkeypatch.setenv("AGX_OKTA_CLIENT_SECRET", "oktasecret")
+    monkeypatch.setenv("AGX_OKTA_ISSUER", "https://example.okta.com/oauth2/default")
 
     providers = load_oauth_providers()
 
     assert "google" in providers
     assert "github" in providers
+    assert "okta" in providers
     assert providers["google"].kind == "oidc"
     assert providers["github"].kind == "oauth2"
+    assert providers["okta"].kind == "oidc"
 
 
 def test_visible_provider_cards_reflect_configured_providers_only():
@@ -32,9 +37,11 @@ def test_visible_provider_cards_reflect_configured_providers_only():
 
     google = next(item for item in cards if item["name"] == "google")
     github = next(item for item in cards if item["name"] == "github")
+    okta = next(item for item in cards if item["name"] == "okta")
 
     assert google["flow"] == "fedcm"
     assert google["enabled"] is True
     assert google["fedcm_enabled"] is True
     assert google["redirect_enabled"] is True
     assert github["enabled"] is False
+    assert okta["enabled"] is False

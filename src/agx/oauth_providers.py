@@ -57,6 +57,21 @@ def load_oauth_providers() -> Dict[str, OAuthProvider]:
             userinfo_endpoint="https://api.github.com/user",
         )
 
+    okta_id = os.getenv("AGX_OKTA_CLIENT_ID", "").strip()
+    okta_secret = os.getenv("AGX_OKTA_CLIENT_SECRET", "").strip()
+    okta_issuer = os.getenv("AGX_OKTA_ISSUER", "").strip().rstrip("/")
+    if okta_id and okta_secret and okta_issuer:
+        providers["okta"] = OAuthProvider(
+            name="okta",
+            label="Okta",
+            kind="oidc",
+            flow="redirect",
+            client_id=okta_id,
+            client_secret=okta_secret,
+            scopes="openid email profile",
+            server_metadata_url=f"{okta_issuer}/.well-known/openid-configuration",
+        )
+
     return providers
 
 
@@ -64,6 +79,7 @@ def visible_provider_cards(providers: Dict[str, OAuthProvider]) -> List[dict]:
     supported = {
         "google": {"label": "Google", "kind": "oidc", "flow": "fedcm"},
         "github": {"label": "GitHub", "kind": "oauth2", "flow": "redirect"},
+        "okta": {"label": "Okta", "kind": "oidc", "flow": "redirect"},
     }
     cards = []
     for name, meta in supported.items():
