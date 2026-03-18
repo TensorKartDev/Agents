@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 try:
     from authlib.integrations.starlette_client import OAuth
 except Exception:  # pragma: no cover - optional dependency
@@ -46,6 +46,7 @@ from ..oauth_providers import load_oauth_providers, visible_provider_cards
 from ..persistence import PostgresRunStore
 from ..runtime.integrations import build_runtime_integrations
 from ..runtime.interoperability import build_handoff_payload, parse_output_text, resolve_bindings
+from ..remote_worker import hostname as worker_hostname
 from ..security import AuthManager, SessionUser
 from ..workspace import resolve_workspace_paths
 from dotenv import load_dotenv
@@ -167,7 +168,8 @@ async def init_run_store() -> None:
     RUN_STORE = PostgresRunStore(db_url)
     for record in RUN_STORE.list_runs():
         try:
-            config = ProjectConfig.from_file(record.config_path)
+            resolved = _resolve_requested_config(record.config_path)
+            config = resolved["project_config"]
         except Exception:
             continue
         state = RunState(
@@ -179,6 +181,9 @@ async def init_run_store() -> None:
             requested_path=record.requested_path,
             total_tasks=record.total_tasks,
             completed_tasks=record.completed_tasks,
+            remote_execution=bool(resolved.get("remote_execution")),
+            assigned_worker_id=resolved.get("assigned_worker_id"),
+            remote_agent_slug=resolved.get("remote_agent_slug"),
         )
         state.completed = record.completed
         state.stop_requested = record.stop_requested
@@ -196,6 +201,9 @@ class AgentInfo:
     description: str
     icon: str
     config_path: str
+    source: str = "local"
+    worker_id: Optional[str] = None
+    owner_username: Optional[str] = None
     llm_host: Optional[str] = None
     tool_host: Optional[str] = None
     inputs: Optional[Any] = None
@@ -222,6 +230,24 @@ def _load_manifest(path: Path, *, validate: bool = True) -> Optional[Dict[str, A
             return data
     except Exception:
         return None
+
+
+def _make_remote_config_token(worker_id: str, agent_slug: str) -> str:
+    return f"worker://{worker_id}/{agent_slug}"
+
+
+def _parse_remote_config_token(value: str) -> Optional[tuple[str, str]]:
+    if not isinstance(value, str) or not value.startswith("worker://"):
+        return None
+    payload = value[len("worker://") :]
+    if "/" not in payload:
+        return None
+    worker_id, agent_slug = payload.split("/", 1)
+    worker_id = worker_id.strip()
+    agent_slug = agent_slug.strip()
+    if not worker_id or not agent_slug:
+        return None
+    return worker_id, agent_slug
 
 
 def scan_for_agents() -> List[AgentInfo]:
@@ -275,6 +301,30 @@ def scan_for_agents() -> List[AgentInfo]:
                 description=manifest.get("description", ""),
                 icon=icon_path,
                 config_path=str(config_path),
+                source="local",
+                llm_host=manifest.get("llm_host"),
+                tool_host=manifest.get("tool_host"),
+                inputs=manifest.get("inputs"),
+                outputs=manifest.get("outputs"),
+                capabilities=manifest.get("capabilities"),
+                version=manifest.get("version"),
+                compatibility=manifest.get("compatibility"),
+                pricing=manifest.get("pricing"),
+            )
+        )
+
+    for remote in ADMIN_STORE.list_worker_agents():
+        manifest = _load_structured(remote.manifest_json) or {}
+        agents.append(
+            AgentInfo(
+                id=f"{remote.worker_id}:{remote.agent_slug}",
+                name=str(manifest.get("name") or remote.agent_name or remote.agent_slug),
+                description=str(manifest.get("description") or ""),
+                icon="/static/img/robot.svg",
+                config_path=_make_remote_config_token(remote.worker_id, remote.agent_slug),
+                source="remote",
+                worker_id=remote.worker_id,
+                owner_username=remote.owner_username,
                 llm_host=manifest.get("llm_host"),
                 tool_host=manifest.get("tool_host"),
                 inputs=manifest.get("inputs"),
@@ -295,7 +345,12 @@ async def list_agents(request: Request) -> JSONResponse:
     user = AUTH.read_session(request.cookies.get(AUTH_COOKIE_NAME, ""))
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    agents = scan_for_agents()
+    owner_user_id = _scoped_owner_user_id(user)
+    agents = [
+        agent
+        for agent in scan_for_agents()
+        if agent.source != "remote" or owner_user_id is None or agent.owner_username == user.username
+    ]
     return JSONResponse([agent.__dict__ for agent in agents])
 
 
@@ -322,6 +377,10 @@ class RunState:
     requested_path: str = ""
     pending_input: "PendingInput | None" = None
     pending_approval: "PendingApproval | None" = None
+    pending_remote_task: "PendingRemoteTask | None" = None
+    remote_execution: bool = False
+    assigned_worker_id: Optional[str] = None
+    remote_agent_slug: Optional[str] = None
     event_seq: int = 0
 
 
@@ -332,6 +391,33 @@ RUN_STORE: PostgresRunStore | None = None
 class RunRequest(BaseModel):
     config_path: str
     engine: str = "autogen"
+
+
+class WorkerLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class WorkerRegistrationRequest(BaseModel):
+    worker_id: str
+    hostname: str
+    runtime_url: str
+    capabilities: Dict[str, Any] = {}
+    agents: List[Dict[str, Any]] = []
+
+
+class WorkerPollRequest(BaseModel):
+    worker_id: str
+
+
+class WorkerTaskCompleteRequest(BaseModel):
+    worker_id: str
+    output: str = ""
+    duration: float = 0.0
+    parsed_output: Optional[Any] = None
+    metadata: Dict[str, Any] = {}
+    console: List[str] = []
+    error: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -377,6 +463,23 @@ class PendingApproval:
     event: asyncio.Event = field(default_factory=asyncio.Event)
     approved: Optional[bool] = None
     response_reason: Optional[str] = None
+
+
+@dataclass
+class PendingRemoteTask:
+    lease_id: str
+    worker_id: str
+    task_id: str
+    spec: Any
+    payload: Dict[str, Any]
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    delivered_at: float = 0.0
+    output: str = ""
+    duration: float = 0.0
+    parsed_output: Any = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    console: List[str] = field(default_factory=list)
+    error: Optional[str] = None
 
 
 def _run_dir(run_id: str) -> Path:
@@ -446,6 +549,20 @@ def _extract_json_payload(text: str) -> Any:
 def _require_user(request: Request) -> SessionUser:
     token = request.cookies.get(AUTH_COOKIE_NAME, "")
     user = AUTH.read_session(token)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return user
+
+
+def _read_bearer_session(authorization: Optional[str]) -> Optional[SessionUser]:
+    header = str(authorization or "").strip()
+    if not header.lower().startswith("bearer "):
+        return None
+    return AUTH.read_session(header.split(" ", 1)[1].strip())
+
+
+def _require_api_user(authorization: Optional[str] = Header(default=None)) -> SessionUser:
+    user = _read_bearer_session(authorization)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     return user
@@ -604,6 +721,136 @@ def _find_uploaded_agent_dir(root: Path) -> Path:
     raise HTTPException(status_code=400, detail="Uploaded package is missing agent.yaml")
 
 
+def _install_agent_dir(agent_dir: Path, manifest: Dict[str, Any], user: SessionUser) -> tuple[PackageRecord, Dict[str, Any]]:
+    AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    slug = _sanitize_slug(str(manifest.get("id") or agent_dir.name))
+    existing = ADMIN_STORE.get_package_by_slug(slug)
+    if existing is not None and user.role != "admin" and existing.owner_user_id != user.user_id:
+        raise HTTPException(status_code=403, detail="This agent slug is owned by another user")
+    target_dir = AGENTS_DIR / slug
+    restarted = target_dir.exists()
+    if restarted:
+        shutil.rmtree(target_dir)
+    shutil.copytree(agent_dir, target_dir)
+    _update_registry_with_slug(slug)
+    preview = _collect_package_preview(target_dir, manifest)
+    stored = ADMIN_STORE.upsert_package(
+        owner_user_id=user.user_id,
+        owner_username=user.username,
+        slug=slug,
+        name=str(preview["name"]),
+        version=str(preview["version"]),
+        description=str(preview["description"]),
+        manifest=manifest,
+        config_path=str(preview["config_path"]),
+        package_path=str(target_dir),
+        restarted=restarted,
+    )
+    return stored, preview
+
+
+def _parse_builder_json_field(raw: str, *, field_name: str) -> Any:
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON for {field_name}: {exc}") from exc
+
+
+def _normalize_builder_file_entries(files: List[UploadFile], file_paths: List[str]) -> List[tuple[UploadFile, str]]:
+    entries: List[tuple[UploadFile, str]] = []
+    for idx, upload in enumerate(files):
+        raw_path = file_paths[idx] if idx < len(file_paths) else (upload.filename or f"file_{idx}")
+        path_text = str(raw_path or upload.filename or f"file_{idx}").strip().replace("\\", "/")
+        candidate = Path(path_text)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise HTTPException(status_code=400, detail=f"Invalid uploaded file path: {path_text}")
+        entries.append((upload, path_text))
+    top_levels = {
+        parts[0]
+        for _, rel_path in entries
+        if len([part for part in Path(rel_path).parts if part]) > 1
+        for parts in ([part for part in Path(rel_path).parts if part],)
+    }
+    normalized: List[tuple[UploadFile, str]] = []
+    strip_root = len(top_levels) == 1
+    for upload, rel_path in entries:
+        parts = [part for part in Path(rel_path).parts if part]
+        if strip_root and len(parts) > 1:
+            parts = parts[1:]
+        normalized_path = "/".join(parts) if parts else (upload.filename or "file")
+        base_name = Path(normalized_path).name.lower()
+        if base_name in {"agent.yaml", "agent.yml"}:
+            raise HTTPException(status_code=400, detail="Do not upload agent.yaml in builder mode; AGX generates it.")
+        normalized.append((upload, normalized_path))
+    return normalized
+
+
+async def _build_agent_package_from_upload(
+    *,
+    slug: str,
+    name: str,
+    description: str,
+    version: str,
+    config_path: str,
+    icon_path: str,
+    capabilities: Any,
+    inputs: Any,
+    outputs: Any,
+    files: List[UploadFile],
+    file_paths: List[str],
+) -> tuple[Path, Dict[str, Any]]:
+    safe_slug = _sanitize_slug(slug or name)
+    safe_config_path = str(Path(config_path.strip() or "config.yaml")).replace("\\", "/")
+    if Path(safe_config_path).is_absolute() or ".." in Path(safe_config_path).parts:
+        raise HTTPException(status_code=400, detail="config_path must stay inside the package root")
+    normalized_entries = _normalize_builder_file_entries(files, file_paths)
+    with tempfile.TemporaryDirectory(prefix="agx_builder_") as tmpdir:
+        tmp_root = Path(tmpdir)
+        agent_dir = tmp_root / safe_slug
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        written_paths: List[str] = []
+        for upload, rel_path in normalized_entries:
+            target = (agent_dir / rel_path).resolve()
+            if not str(target).startswith(str(agent_dir.resolve())):
+                raise HTTPException(status_code=400, detail=f"Unsafe file path: {rel_path}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(await upload.read())
+            written_paths.append(rel_path)
+        if safe_config_path not in written_paths:
+            raise HTTPException(status_code=400, detail=f"Uploaded files must include {safe_config_path}")
+        manifest: Dict[str, Any] = {
+            "id": safe_slug,
+            "name": name.strip() or safe_slug,
+            "description": description.strip(),
+            "config_path": safe_config_path,
+            "version": version.strip() or "1.0.0",
+        }
+        if icon_path.strip():
+            manifest["icon"] = icon_path.strip()
+        if capabilities is not None:
+            manifest["capabilities"] = capabilities
+        if inputs is not None:
+            manifest["inputs"] = inputs
+        if outputs is not None:
+            manifest["outputs"] = outputs
+        errors = validate_manifest(manifest)
+        if errors:
+            raise HTTPException(status_code=400, detail="; ".join(errors))
+        manifest = normalize_manifest(manifest)
+        (agent_dir / "agent.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
+        try:
+            ProjectConfig.from_file(agent_dir / safe_config_path)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid workflow config: {exc}") from exc
+        final_dir = Path(tempfile.mkdtemp(prefix="agx_builder_result_")) / safe_slug
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(agent_dir, final_dir)
+    return final_dir, manifest
+
+
 def _package_to_payload(package: PackageRecord) -> Dict[str, Any]:
     manifest = _load_structured(package.manifest_json) or {}
     payload = {
@@ -632,6 +879,58 @@ def _package_to_payload(package: PackageRecord) -> Dict[str, Any]:
     return payload
 
 
+def _resolve_worker_agent(worker_id: str, agent_slug: str) -> Optional[Dict[str, Any]]:
+    items = ADMIN_STORE.list_worker_agents(worker_id=worker_id)
+    for item in items:
+        if item.agent_slug == agent_slug:
+            return {
+                "worker_id": item.worker_id,
+                "owner_user_id": item.owner_user_id,
+                "owner_username": item.owner_username,
+                "agent_slug": item.agent_slug,
+                "agent_name": item.agent_name,
+                "manifest": _load_structured(item.manifest_json) or {},
+                "config": _load_structured(item.config_json) or {},
+                "config_path": item.config_path,
+            }
+    return None
+
+
+def _resolve_requested_config(config_path: str) -> Dict[str, Any]:
+    remote = _parse_remote_config_token(config_path)
+    if remote is None:
+        path = Path(config_path)
+        if not path.exists():
+            raise HTTPException(status_code=400, detail=f"Config not found: {path}")
+        return {
+            "project_config": ProjectConfig.from_file(str(path)),
+            "resolved_path": str(path.resolve()),
+            "requested_path": config_path,
+            "remote_execution": False,
+            "assigned_worker_id": None,
+            "remote_agent_slug": None,
+            "owner_user_id": None,
+            "owner_username": None,
+        }
+    worker_id, agent_slug = remote
+    worker_agent = _resolve_worker_agent(worker_id, agent_slug)
+    if worker_agent is None:
+        raise HTTPException(status_code=404, detail=f"Remote agent not found: {config_path}")
+    config_data = worker_agent.get("config")
+    if not isinstance(config_data, dict):
+        raise HTTPException(status_code=400, detail=f"Remote agent config is invalid: {config_path}")
+    return {
+        "project_config": ProjectConfig.from_mapping(dict(config_data)),
+        "resolved_path": config_path,
+        "requested_path": config_path,
+        "remote_execution": True,
+        "assigned_worker_id": worker_id,
+        "remote_agent_slug": agent_slug,
+        "owner_user_id": worker_agent.get("owner_user_id"),
+        "owner_username": worker_agent.get("owner_username"),
+    }
+
+
 def _login_redirect_target(next_path: str = "/") -> RedirectResponse:
     safe_next = next_path if next_path.startswith("/") else "/"
     return RedirectResponse(url=f"/login?next={safe_next}", status_code=status.HTTP_302_FOUND)
@@ -652,6 +951,47 @@ def _ensure_run_access(state: RunState, user: SessionUser, run_id: str) -> None:
     owner_user_id = _scoped_owner_user_id(user)
     if owner_user_id is not None and state.owner_user_id != owner_user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run not found: {run_id}")
+
+
+async def _broadcast_run_event(
+    run_id: str,
+    event: Dict[str, Any],
+    *,
+    integrations: Any = None,
+) -> Dict[str, Any]:
+    state = RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    envelope = dict(event)
+    envelope.setdefault("run_id", run_id)
+    envelope.setdefault("project", state.config.name)
+    envelope.setdefault("engine", state.engine)
+    state.history.append(envelope)
+    state.event_seq += 1
+    if integrations is not None:
+        try:
+            integrations.emit(envelope)
+        except Exception:
+            pass
+    if RUN_STORE is not None:
+        RUN_STORE.append_event(run_id, state.event_seq, envelope)
+    for queue in list(state.subscribers):
+        await queue.put(envelope)
+    return envelope
+
+
+def _persist_run_state(run_id: str) -> None:
+    if RUN_STORE is None:
+        return
+    state = RUNS.get(run_id)
+    if state is None:
+        return
+    RUN_STORE.update_run(
+        run_id=run_id,
+        completed_tasks=state.completed_tasks,
+        completed=state.completed,
+        stop_requested=state.stop_requested,
+    )
 
 
 @app.get("/api/auth/me")
@@ -823,6 +1163,132 @@ async def oauth_callback(provider_name: str, request: Request):
     return redirect
 
 
+@app.post("/api/worker/login")
+async def worker_login(payload: WorkerLoginRequest) -> Dict[str, Any]:
+    login_value = payload.username.strip()
+    record = ADMIN_STORE.get_user_by_email(login_value) or ADMIN_STORE.get_user_by_username(login_value)
+    if record is None or not record.active or not AUTH.verify_password(payload.password, record.password_hash, record.salt):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    user = SessionUser(
+        user_id=record.user_id,
+        tenant_id=record.tenant_id or "",
+        tenant_name=record.tenant_name or "",
+        username=record.username,
+        email=record.email,
+        role=record.role,
+        display_name=record.display_name,
+    )
+    return {
+        "session_token": AUTH.issue_session(user),
+        "worker_id": _sanitize_slug(f"{record.username}-{worker_hostname()}"),
+        "user": {
+            "user_id": user.user_id,
+            "username": user.username,
+            "role": user.role,
+            "display_name": user.display_name,
+        },
+    }
+
+
+@app.post("/api/worker/register")
+async def worker_register(
+    payload: WorkerRegistrationRequest,
+    user: SessionUser = Depends(_require_api_user),
+) -> Dict[str, Any]:
+    worker = ADMIN_STORE.upsert_worker(
+        worker_id=_sanitize_slug(payload.worker_id),
+        owner_user_id=user.user_id,
+        owner_username=user.username,
+        hostname=payload.hostname.strip() or worker_hostname(),
+        runtime_url=payload.runtime_url.strip() or "",
+        status="online",
+        capabilities=dict(payload.capabilities or {}),
+    )
+    ADMIN_STORE.upsert_worker_agents(
+        worker_id=worker.worker_id,
+        owner_user_id=user.user_id,
+        owner_username=user.username,
+        agents=list(payload.agents or []),
+    )
+    return {
+        "worker_id": worker.worker_id,
+        "hostname": worker.hostname,
+        "registered_agents": len(payload.agents or []),
+        "status": worker.status,
+    }
+
+
+@app.post("/api/worker/poll")
+async def worker_poll(
+    payload: WorkerPollRequest,
+    user: SessionUser = Depends(_require_api_user),
+) -> Dict[str, Any]:
+    worker_id = _sanitize_slug(payload.worker_id)
+    worker = ADMIN_STORE.get_worker(worker_id)
+    if worker is None or worker.owner_user_id != user.user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Worker not found: {worker_id}")
+    ADMIN_STORE.upsert_worker(
+        worker_id=worker.worker_id,
+        owner_user_id=worker.owner_user_id,
+        owner_username=worker.owner_username,
+        hostname=worker.hostname,
+        runtime_url=worker.runtime_url,
+        status="online",
+        capabilities=_load_structured(worker.capabilities_json) or {},
+    )
+    now = time.time()
+    for run_id, state in RUNS.items():
+        pending = state.pending_remote_task
+        if pending is None or pending.worker_id != worker_id or pending.event.is_set():
+            continue
+        if pending.delivered_at and now - pending.delivered_at < 120:
+            continue
+        pending.delivered_at = now
+        await _broadcast_run_event(
+            run_id,
+            {"type": "worker_task_leased", "task_id": pending.task_id, "worker_id": worker_id, "lease_id": pending.lease_id},
+        )
+        return {"assignment": pending.payload}
+    return {"assignment": None}
+
+
+@app.post("/api/worker/tasks/{lease_id}/complete")
+async def worker_complete_task(
+    lease_id: str,
+    payload: WorkerTaskCompleteRequest,
+    user: SessionUser = Depends(_require_api_user),
+) -> Dict[str, Any]:
+    worker_id = _sanitize_slug(payload.worker_id)
+    worker = ADMIN_STORE.get_worker(worker_id)
+    if worker is None or worker.owner_user_id != user.user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Worker not found: {worker_id}")
+    for run_id, state in RUNS.items():
+        pending = state.pending_remote_task
+        if pending is None or pending.lease_id != lease_id:
+            continue
+        if pending.worker_id != worker_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Lease does not belong to this worker")
+        pending.output = payload.output
+        pending.duration = float(payload.duration or 0.0)
+        pending.parsed_output = payload.parsed_output
+        pending.metadata = dict(payload.metadata or {})
+        pending.console = [str(item) for item in (payload.console or [])]
+        pending.error = payload.error
+        pending.event.set()
+        await _broadcast_run_event(
+            run_id,
+            {
+                "type": "worker_task_reported",
+                "task_id": pending.task_id,
+                "worker_id": worker_id,
+                "lease_id": lease_id,
+                "error": payload.error,
+            },
+        )
+        return {"ok": True, "run_id": run_id, "task_id": pending.task_id}
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Lease not found: {lease_id}")
+
+
 @app.get("/api/admin/users")
 async def admin_list_users(_: SessionUser = Depends(_require_admin)) -> Dict[str, Any]:
     users = [
@@ -873,6 +1339,20 @@ async def admin_create_user(payload: CreateUserRequest, _: SessionUser = Depends
     }
 
 
+@app.get("/api/admin/discovery")
+async def admin_discovery(user: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
+    owner_user_id = _scoped_owner_user_id(user)
+    payload = ADMIN_STORE.build_discovery_map(owner_user_id)
+    payload["runtime"] = {
+        "base_dir": str(BASE_DIR),
+        "agents_dir": str(AGENTS_DIR),
+        "registry_path": str(AGENT_REGISTRY),
+        "runs_dir": str(RUNS_DIR),
+        "url_hint": os.getenv("AGX_RUNTIME_URL", "").strip(),
+    }
+    return payload
+
+
 @app.get("/login")
 async def login_page() -> FileResponse:
     if not LOGIN_HTML.exists():
@@ -901,10 +1381,8 @@ async def admin_page(request: Request):
 @app.post("/api/run")
 async def start_run(request: RunRequest, owner: SessionUser = Depends(_require_user)) -> Dict[str, Any]:
   print(f"[server] /api/run called with config_path={request.config_path} engine={request.engine}")
-  config_path = Path(request.config_path)
-  if not config_path.exists():
-    raise HTTPException(status_code=400, detail=f"Config not found: {config_path}")
-  resolved_path = str(config_path.resolve())
+  resolved = _resolve_requested_config(request.config_path)
+  resolved_path = str(resolved["resolved_path"])
   # If a run for the same config is already active, reuse it instead of starting a duplicate.
   # Treat "not completed but no live task" as stale and allow a new run.
   for existing_id, existing_state in RUNS.items():
@@ -922,7 +1400,10 @@ async def start_run(request: RunRequest, owner: SessionUser = Depends(_require_u
             completed=True,
             stop_requested=existing_state.stop_requested,
         )
-  config = ProjectConfig.from_file(str(config_path))
+  config = resolved["project_config"]
+  remote_owner_user_id = resolved.get("owner_user_id")
+  if resolved.get("remote_execution") and owner.role != "admin" and remote_owner_user_id not in {None, owner.user_id}:
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This remote agent belongs to another user")
   run_id = str(uuid.uuid4())
   _ensure_run_dirs(run_id)
   state = RunState(
@@ -934,6 +1415,9 @@ async def start_run(request: RunRequest, owner: SessionUser = Depends(_require_u
       requested_path=request.config_path,
       total_tasks=len(config.tasks),
       completed_tasks=0,
+      remote_execution=bool(resolved.get("remote_execution")),
+      assigned_worker_id=resolved.get("assigned_worker_id"),
+      remote_agent_slug=resolved.get("remote_agent_slug"),
   )
   RUNS[run_id] = state
   if RUN_STORE is not None:
@@ -951,7 +1435,8 @@ async def start_run(request: RunRequest, owner: SessionUser = Depends(_require_u
         stop_requested=False,
         started_at=state.started_at,
     )
-  ADMIN_STORE.bump_package_traffic(resolved_path)
+  if not state.remote_execution:
+      ADMIN_STORE.bump_package_traffic(resolved_path)
   state.task = asyncio.create_task(execute_run(run_id, config, request.engine))
   return {"run_id": run_id, "project": config.name}
 
@@ -969,6 +1454,9 @@ async def stop_run(run_id: str, user: SessionUser = Depends(_require_user)) -> D
     if state.pending_approval is not None:
         state.pending_approval.approved = False
         state.pending_approval.event.set()
+    if state.pending_remote_task is not None:
+        state.pending_remote_task.error = "Run stopped"
+        state.pending_remote_task.event.set()
     if state.task and not state.task.done():
         state.task.cancel()
     state.completed = True
@@ -1398,6 +1886,90 @@ async def execute_run(run_id: str, config: ProjectConfig, engine: str) -> None:
             }
           )
           state.pending_input = None
+          continue
+
+        if state.remote_execution and state.assigned_worker_id:
+          lease_id = str(uuid.uuid4())
+          payload = {
+            "lease_id": lease_id,
+            "run_id": run_id,
+            "engine": engine,
+            "worker_id": state.assigned_worker_id,
+            "agent_slug": state.remote_agent_slug,
+            "task_id": spec.id,
+            "task_type": task_type or "",
+            "agent": getattr(spec, "agent", ""),
+            "description": getattr(spec, "description", ""),
+            "input": getattr(spec, "input", None),
+            "context": getattr(spec, "context", {}),
+          }
+          state.pending_remote_task = PendingRemoteTask(
+            lease_id=lease_id,
+            worker_id=state.assigned_worker_id,
+            task_id=spec.id,
+            spec=spec,
+            payload=payload,
+          )
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "queued_for_worker",
+              "worker_id": state.assigned_worker_id,
+              "duration": 0,
+            }
+          )
+          await state.pending_remote_task.event.wait()
+          pending = state.pending_remote_task
+          if state.stop_requested:
+            stopped_early = True
+            break
+          if pending is None:
+            await broadcast({"type": "error", "message": f"Remote worker state missing for task {spec.id}"})
+            stopped_early = True
+            break
+          for line in pending.console:
+            if line:
+              await broadcast({"type": "console", "message": line, "task_id": spec.id, "worker_id": pending.worker_id})
+          if pending.error:
+            await broadcast(
+              {
+                "type": "status",
+                "task_id": spec.id,
+                "status": "failed",
+                "output": pending.error,
+                "duration": pending.duration,
+                "worker_id": pending.worker_id,
+              }
+            )
+            stopped_early = True
+            state.pending_remote_task = None
+            break
+          item: Dict[str, Any] = {
+            "output": pending.output,
+            "duration": pending.duration,
+            "parsed_output": pending.parsed_output if pending.parsed_output is not None else parse_output_text(pending.output),
+          }
+          if pending.metadata:
+            item["metadata"] = pending.metadata
+            for k, v in pending.metadata.items():
+              if isinstance(v, (str, int, float, bool)):
+                item[k] = v
+          result_store[spec.id] = item
+          results[spec.id] = item
+          state.completed_tasks += 1
+          persist_run()
+          await broadcast(
+            {
+              "type": "status",
+              "task_id": spec.id,
+              "status": "completed",
+              "output": pending.output,
+              "duration": pending.duration,
+              "worker_id": pending.worker_id,
+            }
+          )
+          state.pending_remote_task = None
           continue
 
         if task_type == "tool_run":
@@ -1969,29 +2541,63 @@ async def admin_upload_package(
         manifest = _load_manifest(manifest_path)
         if not manifest:
             raise HTTPException(status_code=400, detail="Invalid agent manifest")
-        slug = _sanitize_slug(str(manifest.get("id") or agent_dir.name))
-        existing = ADMIN_STORE.get_package_by_slug(slug)
-        if existing is not None and user.role != "admin" and existing.owner_user_id != user.user_id:
-            raise HTTPException(status_code=403, detail="This agent slug is owned by another user")
-        target_dir = AGENTS_DIR / slug
-        restarted = target_dir.exists()
-        if restarted:
-            shutil.rmtree(target_dir)
-        shutil.copytree(agent_dir, target_dir)
-        _update_registry_with_slug(slug)
-        preview = _collect_package_preview(target_dir, manifest)
-        stored = ADMIN_STORE.upsert_package(
-            owner_user_id=user.user_id,
-            owner_username=user.username,
-            slug=slug,
-            name=str(preview["name"]),
-            version=str(preview["version"]),
-            description=str(preview["description"]),
-            manifest=manifest,
-            config_path=str(preview["config_path"]),
-            package_path=str(target_dir),
-            restarted=restarted,
-        )
+        stored, preview = _install_agent_dir(agent_dir, manifest, user)
     payload = _package_to_payload(stored)
     payload["preview"] = preview
     return payload
+
+
+@app.post("/api/admin/packages/build")
+async def admin_build_package(
+    slug: str = Form(""),
+    name: str = Form(""),
+    description: str = Form(""),
+    version: str = Form("1.0.0"),
+    config_path: str = Form("config.yaml"),
+    icon_path: str = Form(""),
+    capabilities_json: str = Form(""),
+    inputs_json: str = Form(""),
+    outputs_json: str = Form(""),
+    action: str = Form("download"),
+    files: List[UploadFile] = File(...),
+    file_paths: List[str] = Form([]),
+    user: SessionUser = Depends(_require_user),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload at least one file or folder entry")
+    capabilities = _parse_builder_json_field(capabilities_json, field_name="capabilities_json")
+    inputs = _parse_builder_json_field(inputs_json, field_name="inputs_json")
+    outputs = _parse_builder_json_field(outputs_json, field_name="outputs_json")
+    built_dir, manifest = await _build_agent_package_from_upload(
+        slug=slug,
+        name=name,
+        description=description,
+        version=version,
+        config_path=config_path,
+        icon_path=icon_path,
+        capabilities=capabilities,
+        inputs=inputs,
+        outputs=outputs,
+        files=files,
+        file_paths=file_paths,
+    )
+    try:
+        if action.strip().lower() == "install":
+            stored, preview = _install_agent_dir(built_dir, manifest, user)
+            payload = _package_to_payload(stored)
+            payload["preview"] = preview
+            payload["built"] = True
+            return JSONResponse(payload)
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in built_dir.rglob("*"):
+                if path.is_file():
+                    bundle.write(path, arcname=str(path.relative_to(built_dir.parent)))
+        headers = {
+            "Content-Disposition": f'attachment; filename="{built_dir.name}.zip"',
+            "X-AGX-Package-Slug": built_dir.name,
+        }
+        return Response(content=archive.getvalue(), media_type="application/zip", headers=headers)
+    finally:
+        shutil.rmtree(built_dir.parent, ignore_errors=True)

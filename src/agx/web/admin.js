@@ -7,6 +7,7 @@ const adminState = {
   selectedRunId: null,
   selectedRun: null,
   packages: [],
+  discovery: { runtime: null, workers: [] },
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -35,10 +36,13 @@ function bindAdminEvents() {
   clickBind('events-refresh', loadEvents);
   clickBind('delete-run', deleteSelectedRun);
   clickBind('packages-refresh', loadPackages);
+  clickBind('discovery-refresh', loadDiscovery);
   clickBind('users-refresh', loadUsers);
 
   const uploadForm = document.getElementById('package-upload-form');
   if (uploadForm) uploadForm.addEventListener('submit', onPackageUpload);
+  const builderForm = document.getElementById('package-builder-form');
+  if (builderForm) builderForm.addEventListener('submit', onPackageBuild);
 
   const userForm = document.getElementById('user-create-form');
   if (userForm) userForm.addEventListener('submit', onUserCreate);
@@ -92,7 +96,7 @@ async function loadAuthProviders() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadRuns(), loadPackages(), loadUsers()]);
+  await Promise.all([loadRuns(), loadPackages(), loadDiscovery(), loadUsers()]);
 }
 
 async function onLoginSubmit(event) {
@@ -164,6 +168,7 @@ function renderLoggedOut(message) {
   renderRuns([]);
   renderEvents([], []);
   renderPackages([]);
+  renderDiscovery({ runtime: null, workers: [] });
   renderUsers([]);
 }
 
@@ -340,6 +345,69 @@ async function onPackageUpload(event) {
   }
 }
 
+async function onPackageBuild(event) {
+  event.preventDefault();
+  const submitter = event.submitter || document.querySelector('[data-builder-action="download"]');
+  const action = submitter ? submitter.dataset.builderAction || 'download' : 'download';
+  const filesInput = document.getElementById('builder-files');
+  if (!filesInput || !filesInput.files || !filesInput.files.length) {
+    textSet('package-builder-status', 'Choose agent files or a folder first.');
+    return;
+  }
+  const form = new FormData();
+  form.append('slug', valueOf('builder-slug'));
+  form.append('name', valueOf('builder-name'));
+  form.append('description', valueOf('builder-description'));
+  form.append('version', valueOf('builder-version') || '1.0.0');
+  form.append('config_path', valueOf('builder-config-path') || 'config.yaml');
+  form.append('icon_path', valueOf('builder-icon-path'));
+  form.append('capabilities_json', valueOf('builder-capabilities'));
+  form.append('inputs_json', valueOf('builder-inputs-json'));
+  form.append('outputs_json', valueOf('builder-outputs-json'));
+  form.append('action', action);
+  Array.from(filesInput.files).forEach((file) => {
+    form.append('files', file, file.name);
+    form.append('file_paths', file.webkitRelativePath || file.name);
+  });
+  textSet('package-builder-status', action === 'install' ? 'Building and installing package...' : 'Building package zip...');
+  try {
+    const response = await fetch('/api/admin/packages/build', {
+      method: 'POST',
+      body: form,
+    });
+    if (!response.ok) {
+      let message = 'Package build failed';
+      try {
+        const data = await response.json();
+        message = data.detail || message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    if (action === 'install') {
+      const data = await response.json();
+      textSet('package-builder-status', `Built and installed ${data.slug}.`);
+      renderPackagePreview(data.preview || data);
+      await loadPackages();
+      return;
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename=\"?([^"]+)\"?/i);
+    const filename = match ? match[1] : `${valueOf('builder-slug') || 'agent-package'}.zip`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    textSet('package-builder-status', `Built ${filename}.`);
+  } catch (error) {
+    textSet('package-builder-status', String(error));
+  }
+}
+
 async function loadPackages() {
   if (!adminState.user) return;
   try {
@@ -392,6 +460,60 @@ function renderPackagePreview(preview) {
   const container = document.getElementById('package-preview');
   if (!container) return;
   container.innerHTML = `<pre class="admin-event-pre">${escapeHtml(JSON.stringify(preview, null, 2))}</pre>`;
+}
+
+async function loadDiscovery() {
+  if (!adminState.user) return;
+  try {
+    const response = await fetch('/api/admin/discovery');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Failed to load discovery map');
+    adminState.discovery = {
+      runtime: data.runtime || null,
+      workers: Array.isArray(data.workers) ? data.workers : [],
+    };
+    renderDiscovery(adminState.discovery);
+  } catch (error) {
+    renderDiscovery({ runtime: null, workers: [{ worker_id: 'error', hostname: String(error), agents: [] }] });
+  }
+}
+
+function renderDiscovery(discovery) {
+  const workers = Array.isArray(discovery.workers) ? discovery.workers : [];
+  textSet('runtime-discovery-summary', `${workers.length} worker node(s) registered with this runtime.`);
+  const runtimePreview = document.getElementById('runtime-discovery-preview');
+  if (runtimePreview) {
+    runtimePreview.innerHTML = `<pre class="admin-event-pre">${escapeHtml(JSON.stringify(discovery.runtime || {}, null, 2))}</pre>`;
+  }
+  const container = document.getElementById('discovery-list');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!workers.length) {
+    container.innerHTML = '<div class="text-secondary small">No workers have registered agent discovery with this runtime yet.</div>';
+    return;
+  }
+  workers.forEach((worker) => {
+    const node = document.createElement('div');
+    node.className = 'admin-event-item';
+    const agents = Array.isArray(worker.agents) ? worker.agents : [];
+    node.innerHTML = `
+      <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+        <div>
+          <div class="admin-run-title">${escapeHtml(worker.hostname || worker.worker_id || '')}</div>
+          <div class="admin-run-meta">${escapeHtml(worker.worker_id || '')} • owner ${escapeHtml(worker.owner_username || '')}</div>
+        </div>
+        <span class="badge bg-info-subtle text-info-emphasis">${escapeHtml(worker.status || 'unknown')}</span>
+      </div>
+      <div class="admin-run-grid">
+        <span><strong>Runtime:</strong> ${escapeHtml(worker.runtime_url || '-')}</span>
+        <span><strong>Agents:</strong> ${agents.length}</span>
+        <span><strong>Last Seen:</strong> ${escapeHtml(worker.last_seen_at || '-')}</span>
+        <span><strong>Capabilities:</strong> ${escapeHtml(Object.keys(worker.capabilities || {}).join(', ') || 'none')}</span>
+      </div>
+      <pre class="admin-event-pre">${escapeHtml(JSON.stringify(worker, null, 2))}</pre>
+    `;
+    container.appendChild(node);
+  });
 }
 
 async function loadUsers() {

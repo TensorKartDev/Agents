@@ -61,6 +61,7 @@
           <ul class="nav nav-pills gap-2" id="admin-tab-bar">
             <li class="nav-item"><button class="nav-link active" type="button" data-admin-tab="runs">Runs</button></li>
             <li class="nav-item"><button class="nav-link" type="button" data-admin-tab="packages">Packages</button></li>
+            <li class="nav-item"><button class="nav-link" type="button" data-admin-tab="discovery">Discovery</button></li>
             <li class="nav-item d-none" id="users-tab-item"><button class="nav-link" type="button" data-admin-tab="users">Users</button></li>
           </ul>
         </div>
@@ -169,6 +170,64 @@
                   <div class="text-secondary small">Preview appears here after upload.</div>
                 </div>
               </div>
+              <div class="glass-card p-4 admin-panel mt-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Build Agent Package</h2>
+                    <small class="text-secondary">Upload agent files or a folder, generate `agent.yaml`, then download or install the package.</small>
+                  </div>
+                </div>
+                <form id="package-builder-form" class="row g-3">
+                  <div class="col-12 col-md-6">
+                    <label for="builder-slug" class="form-label small text-uppercase text-secondary">Slug</label>
+                    <input id="builder-slug" class="form-control" placeholder="my_agent" />
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label for="builder-name" class="form-label small text-uppercase text-secondary">Name</label>
+                    <input id="builder-name" class="form-control" required />
+                  </div>
+                  <div class="col-12">
+                    <label for="builder-description" class="form-label small text-uppercase text-secondary">Description</label>
+                    <textarea id="builder-description" class="form-control" rows="2"></textarea>
+                  </div>
+                  <div class="col-12 col-md-4">
+                    <label for="builder-version" class="form-label small text-uppercase text-secondary">Version</label>
+                    <input id="builder-version" class="form-control" value="1.0.0" />
+                  </div>
+                  <div class="col-12 col-md-4">
+                    <label for="builder-config-path" class="form-label small text-uppercase text-secondary">Config Path</label>
+                    <input id="builder-config-path" class="form-control" value="config.yaml" />
+                  </div>
+                  <div class="col-12 col-md-4">
+                    <label for="builder-icon-path" class="form-label small text-uppercase text-secondary">Icon Path</label>
+                    <input id="builder-icon-path" class="form-control" placeholder="assets/icon.svg" />
+                  </div>
+                  <div class="col-12">
+                    <label for="builder-capabilities" class="form-label small text-uppercase text-secondary">Capabilities JSON</label>
+                    <textarea id="builder-capabilities" class="form-control" rows="2" placeholder='["triage","analysis"]'></textarea>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label for="builder-inputs-json" class="form-label small text-uppercase text-secondary">Inputs JSON</label>
+                    <textarea id="builder-inputs-json" class="form-control" rows="3" placeholder='[{"name":"target","type":"string"}]'></textarea>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label for="builder-outputs-json" class="form-label small text-uppercase text-secondary">Outputs JSON</label>
+                    <textarea id="builder-outputs-json" class="form-control" rows="3" placeholder='[{"name":"summary","type":"text"}]'></textarea>
+                  </div>
+                  <div class="col-12">
+                    <label for="builder-files" class="form-label small text-uppercase text-secondary">Agent Files Or Folder</label>
+                    <input id="builder-files" class="form-control" type="file" multiple webkitdirectory directory required />
+                    <div class="small text-secondary mt-2">Include the workflow config file referenced above. Do not include `agent.yaml`; AGX generates it for you.</div>
+                  </div>
+                  <div class="col-12 col-md-6 d-grid">
+                    <button id="builder-download" class="btn btn-outline-primary" type="submit" data-builder-action="download">Build Zip</button>
+                  </div>
+                  <div class="col-12 col-md-6 d-grid">
+                    <button id="builder-install" class="btn btn-primary" type="submit" data-builder-action="install">Build And Install</button>
+                  </div>
+                </form>
+                <div class="small mt-3" id="package-builder-status">No package built yet.</div>
+              </div>
             </div>
             <div class="col-12 col-lg-7">
               <div class="glass-card p-4 admin-panel">
@@ -180,6 +239,37 @@
                   <button id="packages-refresh" class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-repeat"></i> Refresh</button>
                 </div>
                 <div id="package-list" class="admin-list"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section data-admin-panel="discovery" class="d-none">
+          <div class="row g-4">
+            <div class="col-12 col-lg-4">
+              <div class="glass-card p-4 admin-panel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Runtime View</h2>
+                    <small class="text-secondary">How this AGX runtime sees worker-advertised agents.</small>
+                  </div>
+                  <button id="discovery-refresh" class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-repeat"></i> Refresh</button>
+                </div>
+                <div id="runtime-discovery-summary" class="small text-secondary">Loading discovery map...</div>
+                <div class="admin-preview mt-3" id="runtime-discovery-preview">
+                  <div class="text-secondary small">Runtime workspace details appear here.</div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-8">
+              <div class="glass-card p-4 admin-panel">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h2 class="h5 mb-0 text-info">Workers And Agents</h2>
+                    <small class="text-secondary">Maps runtime discovery by agents and agent discovery by the runtime.</small>
+                  </div>
+                </div>
+                <div id="discovery-list" class="admin-list"></div>
               </div>
             </div>
           </div>

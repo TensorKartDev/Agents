@@ -106,6 +106,15 @@ agents:
 
 Once registered, your agent appears in the Admin Web UI and CLI for the entire org. The framework enforces consistent orchestration, approvals, and artifacts while you focus on capability.
 
+### Web-based package builder
+
+AGX Admin now supports two package onboarding paths:
+
+- upload a finished `.zip` agent package
+- build a package in the browser by uploading agent files or a folder, generating `agent.yaml`, then downloading or installing the package
+
+The package builder expects you to include the workflow config file such as `config.yaml` in the uploaded files. AGX generates `agent.yaml` from the form fields and validates the resulting package before download or install.
+
 
 ## Running AGX with Docker
 
@@ -425,6 +434,134 @@ defaults:
 ```
 
 Per-agent overrides are supported via `llm_params` blocks inside each agent. The provider automatically sets `stream=false` and surfaces any HTTP/API errors so the orchestrator can stop gracefully.
+
+### Running AGX on one machine and GPU inference on another
+
+This deployment pattern is supported:
+
+- AGX Runtime, Web, and Admin can run on machine A.
+- Your GPU-backed model server such as Ollama can run on machine B.
+- AGX can call the remote model endpoint by setting `defaults.llm_params.host`.
+- Agents can also run on registered worker machines through the AGX worker protocol.
+
+#### Recommended working setup
+
+1. Run the AGX web/CLI runtime on the control-plane machine.
+2. Run Ollama or another OpenAI-compatible model server on the GPU machine.
+3. Point `defaults.llm_params.host` at the GPU machine's reachable HTTP endpoint.
+4. Make agent packages available to the AGX machine through one of these methods:
+   - copy the package into the AGX host's `AGX_AGENTS_DIR`
+   - mount a shared filesystem at `AGX_AGENTS_DIR`
+   - upload the package through the AGX admin UI
+5. If a tool must use hardware or software that only exists on the second machine, expose that capability as a network service and call it from an AGX tool.
+
+Example config for AGX on `10.0.0.10` and Ollama on GPU host `10.0.0.25`:
+
+```yaml
+defaults:
+  llm_provider: agx.llm.provider:OllamaProvider
+  llm_params:
+    model: llama3.2
+    host: http://10.0.0.25:11434
+
+agents:
+  edge_agent:
+    description: Coordinates deployment planning for edge inference workloads
+    tools: [edge_deployment_planner, anomaly_scoring]
+    planning:
+      max_iterations: 4
+```
+
+Example environment on the AGX machine:
+
+```bash
+export AGX_AGENTS_DIR=/srv/agx/agents
+export AGX_AGENT_REGISTRY=/srv/agx/agents/agents.yaml
+export AGX_RUNS_DIR=/srv/agx/runs
+```
+
+### Desired distributed architecture: AGX control plane plus user-side agent execution
+
+The following topology is now supported as the AGX control-plane plus remote-worker model:
+
+- Host B
+  - Ollama
+  - RabbitMQ
+  - Postgres
+- Host A
+  - AGX Runtime
+  - AGX Web
+  - AGX Admin
+- User machine
+  - AGX CLI
+  - agent execution
+  - user-local tools used by the agent
+
+#### Deployment topology
+
+```text
+                                  +----------------------+
+                                  |       Host B         |
+                                  |----------------------|
+                                  | Ollama / GPU Models  |
+                                  | RabbitMQ             |
+                                  | Postgres             |
+                                  +----------+-----------+
+                                             ^
+                                             |
+                        model calls          | telemetry / persistence
+                                             |
++----------------------+          +----------+-----------+
+|        Host A        |          |                      |
+|----------------------|          |   AGX Control Plane  |
+| AGX Runtime          +---------->   /api/run           |
+| AGX Web              |          |   /api/worker/*      |
+| AGX Admin            |<---------+   WebSocket updates  |
++----------+-----------+          +----------+-----------+
+           ^                                 ^
+           | browser access                  | worker auth / task lease /
+           |                                 | task completion / discovery
+           |                                 |
+           |                      +----------+-----------+
+           |                      |     User Machine     |
+           |                      |----------------------|
+           |                      | AGX CLI worker       |
+           |                      | local agent packs    |
+           |                      | local tools/files    |
+           |                      +----------------------+
+```
+
+Runtime responsibility:
+
+- owns the run record, access control, WebSocket updates, and admin discovery
+- leases executable tasks to the selected worker when the agent is worker-backed
+
+Worker responsibility:
+
+- advertises its locally available agents to the runtime
+- executes leased tasks locally with access to user-local tools and files
+- reports output, logs, and metadata back to the runtime
+
+In this design, the AGX web/runtime tier behaves as the control plane, while the AGX CLI on the user machine behaves as a worker that:
+
+- authenticates to AGX using `/api/worker/login`
+- registers itself and its locally available agent packs with `/api/worker/register`
+- polls for leased tasks from the runtime via `/api/worker/poll`
+- executes the selected task locally so it can access user-local tools and files
+- reports task output, console logs, and metadata back through `/api/worker/tasks/{lease_id}/complete`
+
+The runtime remains the system of record for:
+
+- run ownership and access control
+- run history and WebSocket updates
+- Postgres-backed run persistence
+- admin discovery of workers and worker-advertised agents
+
+The admin Discovery page shows:
+
+- the runtime workspace paths in use
+- registered worker nodes
+- which agents each worker has advertised to the runtime
 
 ## Configuration model
 

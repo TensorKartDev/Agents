@@ -38,3 +38,38 @@ def test_admin_store_bootstrap_and_package_tracking(tmp_path, monkeypatch):
 
     assert refreshed is not None
     assert refreshed.traffic_count == 1
+
+
+def test_admin_store_worker_discovery_mapping(tmp_path):
+    store = AdminStore(Path(tmp_path) / "admin.db")
+
+    worker = store.upsert_worker(
+        worker_id="worker-a",
+        owner_user_id="user-1",
+        owner_username="alice",
+        hostname="alice-laptop",
+        runtime_url="http://host-a:8000",
+        status="online",
+        capabilities={"agent_execution": True},
+    )
+    assert worker.worker_id == "worker-a"
+
+    store.upsert_worker_agents(
+        worker_id="worker-a",
+        owner_user_id="user-1",
+        owner_username="alice",
+        agents=[
+            {
+                "agent_slug": "edge_inference",
+                "agent_name": "Edge Inference",
+                "manifest": {"name": "Edge Inference"},
+                "config": {"name": "edge", "agents": {"a": {"tools": []}}, "tasks": [{"id": "t1", "agent": "a", "description": "d"}]},
+                "config_path": "/Users/alice/agents/edge_inference/config.yaml",
+            }
+        ],
+    )
+
+    discovery = store.build_discovery_map()
+    assert len(discovery["workers"]) == 1
+    assert discovery["workers"][0]["worker_id"] == "worker-a"
+    assert discovery["workers"][0]["agents"][0]["agent_slug"] == "edge_inference"

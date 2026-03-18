@@ -57,6 +57,33 @@ class PackageRecord:
     last_run_at: Optional[str]
 
 
+@dataclass
+class WorkerRecord:
+    worker_id: str
+    owner_user_id: str
+    owner_username: str
+    hostname: str
+    runtime_url: str
+    status: str
+    capabilities_json: str
+    last_seen_at: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class WorkerAgentRecord:
+    worker_id: str
+    owner_user_id: str
+    owner_username: str
+    agent_slug: str
+    agent_name: str
+    manifest_json: str
+    config_json: str
+    config_path: str
+    last_seen_at: str
+
+
 class AdminStore:
     """Persistence layer for web admin users and packages."""
 
@@ -133,6 +160,38 @@ class AdminStore:
                     display_name TEXT,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (provider, subject)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS worker_nodes (
+                    worker_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    owner_username TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    runtime_url TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    capabilities_json TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS worker_agents (
+                    worker_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL,
+                    owner_username TEXT NOT NULL,
+                    agent_slug TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    config_path TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (worker_id, agent_slug)
                 )
                 """
             )
@@ -518,6 +577,188 @@ class AdminStore:
             )
             conn.commit()
 
+    def upsert_worker(
+        self,
+        *,
+        worker_id: str,
+        owner_user_id: str,
+        owner_username: str,
+        hostname: str,
+        runtime_url: str,
+        status: str,
+        capabilities: Dict[str, Any],
+    ) -> WorkerRecord:
+        existing = self.get_worker(worker_id)
+        now = _utc_now()
+        capabilities_json = json.dumps(capabilities or {}, sort_keys=True)
+        with self._connect() as conn:
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO worker_nodes (
+                        worker_id, owner_user_id, owner_username, hostname, runtime_url, status,
+                        capabilities_json, last_seen_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        worker_id,
+                        owner_user_id,
+                        owner_username,
+                        hostname,
+                        runtime_url,
+                        status,
+                        capabilities_json,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE worker_nodes
+                    SET owner_user_id = ?,
+                        owner_username = ?,
+                        hostname = ?,
+                        runtime_url = ?,
+                        status = ?,
+                        capabilities_json = ?,
+                        last_seen_at = ?,
+                        updated_at = ?
+                    WHERE worker_id = ?
+                    """,
+                    (
+                        owner_user_id,
+                        owner_username,
+                        hostname,
+                        runtime_url,
+                        status,
+                        capabilities_json,
+                        now,
+                        now,
+                        worker_id,
+                    ),
+                )
+            conn.commit()
+        worker = self.get_worker(worker_id)
+        if worker is None:
+            raise RuntimeError(f"Failed to upsert worker '{worker_id}'")
+        return worker
+
+    def get_worker(self, worker_id: str) -> Optional[WorkerRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM worker_nodes WHERE worker_id = ?",
+                (worker_id,),
+            ).fetchone()
+        return _row_to_worker(row)
+
+    def list_workers(self, owner_user_id: Optional[str] = None) -> List[WorkerRecord]:
+        with self._connect() as conn:
+            if owner_user_id:
+                rows = conn.execute(
+                    "SELECT * FROM worker_nodes WHERE owner_user_id = ? ORDER BY updated_at DESC",
+                    (owner_user_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM worker_nodes ORDER BY updated_at DESC"
+                ).fetchall()
+        return [_row_to_worker(row) for row in rows if row is not None]
+
+    def upsert_worker_agents(
+        self,
+        *,
+        worker_id: str,
+        owner_user_id: str,
+        owner_username: str,
+        agents: List[Dict[str, Any]],
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM worker_agents WHERE worker_id = ?", (worker_id,))
+            for item in agents:
+                slug = str(item.get("agent_slug") or "").strip()
+                if not slug:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO worker_agents (
+                        worker_id, owner_user_id, owner_username, agent_slug, agent_name,
+                        manifest_json, config_json, config_path, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        worker_id,
+                        owner_user_id,
+                        owner_username,
+                        slug,
+                        str(item.get("agent_name") or slug),
+                        json.dumps(item.get("manifest") or {}, sort_keys=True),
+                        json.dumps(item.get("config") or {}, sort_keys=True),
+                        str(item.get("config_path") or ""),
+                        now,
+                    ),
+                )
+            conn.commit()
+
+    def list_worker_agents(
+        self,
+        owner_user_id: Optional[str] = None,
+        *,
+        worker_id: Optional[str] = None,
+    ) -> List[WorkerAgentRecord]:
+        query = "SELECT * FROM worker_agents"
+        clauses: List[str] = []
+        params: List[str] = []
+        if owner_user_id:
+            clauses.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        if worker_id:
+            clauses.append("worker_id = ?")
+            params.append(worker_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY last_seen_at DESC, agent_slug ASC"
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_row_to_worker_agent(row) for row in rows if row is not None]
+
+    def build_discovery_map(self, owner_user_id: Optional[str] = None) -> Dict[str, Any]:
+        workers = self.list_workers(owner_user_id)
+        worker_agents = self.list_worker_agents(owner_user_id)
+        by_worker: Dict[str, List[WorkerAgentRecord]] = {}
+        for item in worker_agents:
+            by_worker.setdefault(item.worker_id, []).append(item)
+        return {
+            "workers": [
+                {
+                    "worker_id": worker.worker_id,
+                    "owner_user_id": worker.owner_user_id,
+                    "owner_username": worker.owner_username,
+                    "hostname": worker.hostname,
+                    "runtime_url": worker.runtime_url,
+                    "status": worker.status,
+                    "capabilities": json.loads(worker.capabilities_json or "{}"),
+                    "last_seen_at": worker.last_seen_at,
+                    "created_at": worker.created_at,
+                    "updated_at": worker.updated_at,
+                    "agents": [
+                        {
+                            "agent_slug": agent.agent_slug,
+                            "agent_name": agent.agent_name,
+                            "config_path": agent.config_path,
+                            "manifest": json.loads(agent.manifest_json or "{}"),
+                            "config": json.loads(agent.config_json or "{}"),
+                            "last_seen_at": agent.last_seen_at,
+                        }
+                        for agent in by_worker.get(worker.worker_id, [])
+                    ],
+                }
+                for worker in workers
+            ]
+        }
+
 
 def _row_to_user(row: sqlite3.Row | None) -> Optional[UserRecord]:
     if row is None:
@@ -557,6 +798,39 @@ def _row_to_package(row: sqlite3.Row | None) -> Optional[PackageRecord]:
         restart_count=int(row["restart_count"]),
         traffic_count=int(row["traffic_count"]),
         last_run_at=(str(row["last_run_at"]) if row["last_run_at"] else None),
+    )
+
+
+def _row_to_worker(row: sqlite3.Row | None) -> Optional[WorkerRecord]:
+    if row is None:
+        return None
+    return WorkerRecord(
+        worker_id=str(row["worker_id"]),
+        owner_user_id=str(row["owner_user_id"]),
+        owner_username=str(row["owner_username"]),
+        hostname=str(row["hostname"]),
+        runtime_url=str(row["runtime_url"]),
+        status=str(row["status"]),
+        capabilities_json=str(row["capabilities_json"] or "{}"),
+        last_seen_at=str(row["last_seen_at"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _row_to_worker_agent(row: sqlite3.Row | None) -> Optional[WorkerAgentRecord]:
+    if row is None:
+        return None
+    return WorkerAgentRecord(
+        worker_id=str(row["worker_id"]),
+        owner_user_id=str(row["owner_user_id"]),
+        owner_username=str(row["owner_username"]),
+        agent_slug=str(row["agent_slug"]),
+        agent_name=str(row["agent_name"]),
+        manifest_json=str(row["manifest_json"] or "{}"),
+        config_json=str(row["config_json"] or "{}"),
+        config_path=str(row["config_path"] or ""),
+        last_seen_at=str(row["last_seen_at"]),
     )
 
 
